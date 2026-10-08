@@ -47,6 +47,7 @@ Interested in sub-agent monitoring? Check out [opencode-subagent-magazine](https
 - **Collapsible**: Main title collapsed by default; click to expand. Detail, model, and distribution sections fold independently
 - **Adaptive Colors**: ≥85% green · ≥70% orange · <70% red, auto-desaturated from current theme
 - **Token Distribution**: Per-role (system / user / sub-agent instr / tool call / tool result) estimated token breakdown
+- **Bounded Refresh Work**: Streaming updates coalesce within 100ms; unchanged historical text estimates are reused. Global V2 events from other sessions do not refresh the panel. Distribution snapshots are session-owned, coalesced and only saved when changed; balance credentials and polling are unchanged.
 - **Persistent State**: Fold preferences and config remembered across restarts via api.kv
 - **Language**: Chinese / English / 日本語 / 한국어, auto-detects system locale, with `/cache-lang` for runtime switching — user preference takes priority over auto-detection
 - **Multi-currency**: Switch via `/cache-currency` — costs, savings, and per-million rates convert in real time
