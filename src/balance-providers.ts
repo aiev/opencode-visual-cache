@@ -27,6 +27,9 @@ export interface BalanceDetail {
 /** provider 统一错误：message 即错误码（401/403/EMPTY/…），显示层直接展示。 */
 export class BalanceError extends Error {}
 
+/** provider 文案可引用的 i18n key 子集（键定义见 src/i18n.ts）。 */
+export type BalanceMessageKey = "keyUser" | "keyOpenCode" | "keyNotSet" | "keyCli" | "keyCookie" | "balKeyPrompt" | "balCliHint" | "balCookiePrompt" | "balCookieHelp"
+
 /** 可插拔的余额 provider 适配器。 */
 export interface BalanceProvider {
   id: string                    // 唯一标识，同时用作 KV key 命名空间
@@ -36,7 +39,19 @@ export interface BalanceProvider {
   aliases?: readonly string[]
   /** false = 不依赖 API key（凭据由外部登录态提供，如 qwencloud CLI）。默认需要 key。 */
   requiresKey?: boolean
+  /** 凭据的 KV 槽位后缀（默认 "key"）。requiresKey === false 时也可配置可选凭据
+   *  （如 qwencloud 的控制台 Cookie），用独立槽位避免和复用的 API key 混淆。 */
+  credentialSlot?: string
+  /** 可选凭据的输入说明（i18n key）。设置后 /cache-balance-key 为该 provider 打开输入框。 */
+  optionalKeyPrompt?: BalanceMessageKey
+  /** 已配置凭据时菜单标注的 i18n key（默认 "keyUser"）。 */
+  keySourceLabel?: BalanceMessageKey
   fetchBalance(apiKey: string, signal?: AbortSignal): Promise<BalanceEntry[]>
+}
+
+/** provider 凭据的 KV key：`<prefix>.balance.<id>.<credentialSlot ?? "key">`。 */
+export function balanceCredentialKey(kvPrefix: string, provider: BalanceProvider): string {
+  return `${kvPrefix}.balance.${provider.id}.${provider.credentialSlot ?? "key"}`
 }
 
 const siliconflowProvider: BalanceProvider = {
@@ -407,13 +422,18 @@ const openaiProvider: BalanceProvider = {
 }
 
 // ---------------------------------------------------------------------------
-// QwenCloud Token Plan — Credits quota through the official `qwencloud` CLI.
+// QwenCloud Token Plan — Credits quota，两个来源：
+//
+//   1. 控制台 Cookie（可选凭据，优先）：home.qwencloud.com 的网关接口，个人版
+//      （Individual / Pro）也能拿到真实用量，返回窗口用量百分比 + 套餐上限。
+//   2. 官方 CLI 的 device-flow 登录态（无 Cookie 时回退）：
+//      `qwencloud usage summary --format json` 的 `token_plan` 快照。
 //
 // Token Plan 的 `sk-sp-*` key 只做推理：billing 路由一律 `ConsoleNeedLogin`，
-// 无法用 key 查询 quota（官方 FAQ + CodexBar#2328 实测）。quota 只有两个来源：
-// 控制台 Cookie（未文档化）或官方 CLI 的 device-flow 登录态。这里走后者——
-// `qwencloud usage summary --format json` 的 `token_plan` 快照（文档字段：
-// totalCredits / remainingCredits / usedPct / resetDate / planName / status）。
+// quota 无法用 key 查询（官方 FAQ + CodexBar#2328 实测）。CLI 侧对灰度账号
+// （QuerySubscriptionGray=true）只查团队版 seat 接口，个人版订阅会读成
+// `subscribed: false`（QwenCloud/qwencloud-cli#13），因此控制台 Cookie 是
+// 个人版唯一可靠的来源。
 // ---------------------------------------------------------------------------
 
 const QWEN_CLI = "qwencloud"
@@ -531,12 +551,235 @@ export function parseQwenTokenPlanUsage(raw: unknown, nowMs = Date.now()): Balan
   }]
 }
 
+const QWEN_CONSOLE_HOST = "https://home.qwencloud.com"
+const QWEN_CONSOLE_GATEWAY = "https://cs-data.qwencloud.com/data/api.json"
+const QWEN_CONSOLE_REGION = "ap-southeast-1"
+/** 控制台个人版 Token Plan 的网关接口名（未文档化，CodexBar#2328 记录）。 */
+const qwenConsoleApi = (name: string) => `zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/${name}`
+
+/** usage 字段名里的窗口单位（`per5HourPercentage` → `5Hour`）→ 秒数。 */
+const QWEN_WINDOW_SECONDS: Record<string, number> = {
+  "5Hour": 5 * 3600,
+  "1Week": 7 * 86400,
+  "1Month": 30 * 86400,
+}
+
+/** 归一化浏览器 Cookie：容忍 DevTools 复制带来的 `cookie:` 前缀、换行与空白。 */
+export function normalizeQwenCookie(value: string): string {
+  return value.split(/[\r\n]+/).map((line) => line.trim()).filter(Boolean).join("; ")
+    .replace(/^cookie:\s*/i, "").trim()
+}
+
+/** 粗略判断凭据像不像 Cookie（`name=value; …`），避免把误粘贴的 API key 发出去。 */
+export function looksLikeQwenCookie(value: string): boolean {
+  return !/^sk-/i.test(value) && /^[A-Za-z0-9_.-]+=[^;=]/.test(value)
+}
+
+function qwenConsoleHeaders(cookie: string): Record<string, string> {
+  return {
+    cookie,
+    Accept: "application/json",
+    Origin: QWEN_CONSOLE_HOST,
+    Referer: `${QWEN_CONSOLE_HOST}/analytics/token-plan/individual`,
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/147.0.0.0 Safari/537.36",
+  }
+}
+
+/** Cookie 失效的特征：网关返回登录页 / ret 里带 NeedLogin 系列错误。 */
+function looksLoginRequired(output: string): boolean {
+  return /ConsoleNeedLogin|NeedLogin|NotLogin|PleaseLogin|AUTH_REQUIRED|unauthori[sz]ed|token expired/i.test(output)
+}
+
+/** 控制台 CSRF `sec_token`：Cookie 不是有效登录态时拿不到（返回 HTML/空）。 */
+async function qwenConsoleSecToken(cookie: string, signal?: AbortSignal): Promise<string> {
+  const res = await fetch(`${QWEN_CONSOLE_HOST}/tool/user/info.json`, { headers: qwenConsoleHeaders(cookie), signal })
+  const text = await res.text().catch(() => "")
+  if (res.status === 401 || res.status === 403) throw new BalanceError("COOKIE")
+  if (!res.ok) throw new BalanceError(String(res.status))
+  let json: unknown
+  try {
+    json = JSON.parse(text)
+  } catch {
+    throw new BalanceError("COOKIE")
+  }
+  const token = asRecord(asRecord(json)?.data)?.secToken
+  if (typeof token !== "string" || !token) throw new BalanceError("COOKIE")
+  return token
+}
+
+/** 调用一次控制台网关，剥掉 {data:{DataV2:{ret,data:{code,data}}}} 三层信封。 */
+async function qwenConsoleCall(
+  cookie: string,
+  secToken: string,
+  api: string,
+  signal?: AbortSignal,
+): Promise<OpenAIRecord> {
+  const body = new URLSearchParams({
+    product: "sfm_bailian",
+    action: "IntlBroadScopeAspnGateway",
+    sec_token: secToken,
+    region: QWEN_CONSOLE_REGION,
+    params: JSON.stringify({
+      Api: api,
+      Data: {
+        cornerstoneParam: {
+          domain: "home.qwencloud.com",
+          consoleSite: "QWENCLOUD",
+          console: "ONE_CONSOLE",
+          xsp_lang: "en-US",
+          protocol: "V2",
+          productCode: "p_efm",
+        },
+      },
+      V: "1.0",
+    }),
+  })
+  const url = `${QWEN_CONSOLE_GATEWAY}?product=sfm_bailian&action=IntlBroadScopeAspnGateway&api=${encodeURIComponent(api)}`
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { ...qwenConsoleHeaders(cookie), "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+    signal,
+  })
+  if (res.status === 401 || res.status === 403) throw new BalanceError("COOKIE")
+  if (!res.ok) throw new BalanceError(String(res.status))
+  const text = await res.text().catch(() => "")
+  let json: unknown
+  try {
+    json = JSON.parse(text)
+  } catch {
+    throw new BalanceError("COOKIE") // 登录页 HTML
+  }
+  const data = asRecord(asRecord(json)?.data)
+  const envelope = asRecord(data?.DataV2) ?? data
+  const payload = asRecord(asRecord(envelope?.data)?.data)
+  const code = typeof asRecord(envelope?.data)?.code === "string" ? String(asRecord(envelope?.data)?.code) : ""
+  const ret = Array.isArray(envelope?.ret) ? String(envelope?.ret[0] ?? "") : ""
+  if (payload && (code === "SUCCESS" || ret.startsWith("SUCCESS"))) return payload
+  const output = `${code} ${ret} ${typeof data?.message === "string" ? data.message : ""}`
+  if (looksLoginRequired(output)) throw new BalanceError("COOKIE")
+  throw new BalanceError("EMPTY")
+}
+
+/** usage 的 `perXxxPercentage` → 每个限流窗口的用量。 */
+interface QwenQuotaWindow {
+  windowSeconds?: number
+  usedPct: number
+  remainingPct: number
+  resetAfter?: number
+  ceiling?: number
+}
+
+function collectQwenWindows(usage: OpenAIRecord, nowMs: number): QwenQuotaWindow[] {
+  const windows: QwenQuotaWindow[] = []
+  for (const [field, value] of Object.entries(usage)) {
+    const match = /^per(.+)Percentage$/.exec(field)
+    if (!match) continue
+    const raw = asFiniteNumber(value)
+    if (raw === undefined) continue
+    // 控制台给的是 0..1 的小数（0.0154 = 已用 1.55%）；> 1 视为已经是百分数
+    const usedPct = clampPercent(raw > 1 ? raw : raw * 100)
+    windows.push({
+      windowSeconds: QWEN_WINDOW_SECONDS[match[1]],
+      usedPct,
+      remainingPct: clampPercent(100 - usedPct),
+      resetAfter: qwenResetSeconds(usage[`per${match[1]}ResetTime`], nowMs),
+    })
+  }
+  return windows.sort((a, b) => (a.windowSeconds ?? Number.MAX_SAFE_INTEGER) - (b.windowSeconds ?? Number.MAX_SAFE_INTEGER))
+}
+
+/** 窗口 → 该窗口的 Credits 上限（quota-config 按套餐给出，字段为 snake_case）。 */
+function qwenWindowCeiling(windowSeconds: number | undefined, tier: OpenAIRecord | undefined): number | undefined {
+  if (!tier) return undefined
+  if (windowSeconds !== undefined && windowSeconds <= 6 * 3600) return asFiniteNumber(tier.five_hour)
+  if (windowSeconds !== undefined && windowSeconds <= 86400) return asFiniteNumber(tier.daily)
+  if (windowSeconds !== undefined && windowSeconds <= 7 * 86400) return asFiniteNumber(tier.weekly)
+  return asFiniteNumber(tier.monthly)
+}
+
+export interface QwenConsoleSnapshot {
+  usage?: unknown
+  subscription?: unknown
+  quotaConfig?: unknown
+}
+
+/** 合并控制台三个接口（用量 / 订阅 / 套餐上限）为余额条目。 */
+export function parseQwenConsoleQuota(snapshot: QwenConsoleSnapshot, nowMs = Date.now()): BalanceEntry[] {
+  const usage = asRecord(snapshot.usage)
+  const subscription = asRecord(snapshot.subscription)
+  const tiers = asRecord(snapshot.quotaConfig)
+  if (!usage) throw new BalanceError("EMPTY")
+
+  // 订阅非 VALID（过期/退款）：与"接口没返回数据"分开提示
+  const status = typeof subscription?.status === "string" ? subscription.status.toUpperCase() : ""
+  if (status && status !== "VALID") throw new BalanceError("NOPLAN")
+
+  const spec = typeof subscription?.specCode === "string" ? subscription.specCode.toLowerCase() : ""
+  const windows = collectQwenWindows(usage, nowMs)
+  if (windows.length === 0) throw new BalanceError("EMPTY")
+  const tier = spec ? asRecord(tiers?.[spec]) : undefined
+  for (const window of windows) window.ceiling = qwenWindowCeiling(window.windowSeconds, tier)
+
+  const multiple = windows.length > 1
+  const scope = (window: QwenQuotaWindow) => (multiple && window.windowSeconds !== undefined ? { windowSeconds: window.windowSeconds } : {})
+  const details: BalanceDetail[] = []
+  if (spec) details.push({ key: "plan", value: spec.toUpperCase() })
+
+  // Credits 行对齐控制台的 "Plan quota"：取上限最大的窗口（个人版即月度额度）
+  const withCeiling = windows.filter((window) => (window.ceiling ?? 0) > 0)
+  const primary = withCeiling.length > 0 ? withCeiling.reduce((a, b) => ((b.ceiling ?? 0) > (a.ceiling ?? 0) ? b : a)) : undefined
+  const remainingCredits = primary ? Math.round((primary.ceiling ?? 0) * (primary.remainingPct / 100)) : undefined
+  if (primary && remainingCredits !== undefined) {
+    details.push({
+      key: "credits",
+      value: `${formatCreditAmount(remainingCredits)} / ${formatCreditAmount(primary.ceiling ?? 0)}`,
+      ...scope(primary),
+    })
+  }
+  for (const window of windows) {
+    details.push({ key: "used", value: `${formatPercent(window.usedPct)}%`, ...scope(window) })
+    details.push({ key: "remaining", value: `${formatPercent(window.remainingPct)}%`, ...scope(window) })
+    if (window.resetAfter !== undefined) details.push({ key: "reset", value: String(window.resetAfter), ...scope(window) })
+  }
+
+  const summary = formatPercent(clampPercent(Math.min(...windows.map((window) => window.remainingPct))))
+  return [{
+    currency: "CREDITS",
+    total: remainingCredits === undefined ? "0" : String(remainingCredits),
+    // Credits 非货币，走 display 直出，避免被汇率换算
+    display: `Token Plan ${summary}%`,
+    details,
+  }]
+}
+
+/** 控制台 Cookie 读取 quota（个人版/团队版都可用）。 */
+export async function fetchQwenConsoleQuota(credential: string, signal?: AbortSignal): Promise<BalanceEntry[]> {
+  const cookie = normalizeQwenCookie(credential)
+  if (!cookie) throw new BalanceError("COOKIE")
+  const secToken = await qwenConsoleSecToken(cookie, signal)
+  const [usage, subscription, quotaConfig] = await Promise.all([
+    qwenConsoleCall(cookie, secToken, qwenConsoleApi("usage"), signal),
+    qwenConsoleCall(cookie, secToken, qwenConsoleApi("subscription"), signal),
+    qwenConsoleCall(cookie, secToken, qwenConsoleApi("quota-config"), signal),
+  ])
+  return parseQwenConsoleQuota({ usage, subscription, quotaConfig })
+}
+
 const qwencloudProvider: BalanceProvider = {
   id: "qwencloud",
   name: "QwenCloud Token Plan",
-  requiresKey: false, // 登录态在 qwencloud CLI，不消费 API key
+  // 凭据可选：控制台 Cookie（`.cookie` 槽位）优先，未配置时回退 qwencloud CLI 登录态
+  requiresKey: false,
+  credentialSlot: "cookie",
+  optionalKeyPrompt: "balCookiePrompt",
+  keySourceLabel: "keyCookie",
+  keyPlaceholder: "login_qwencloud_ticket=...",
   aliases: ["alibaba-token-plan", "bailian-token-plan"],
-  async fetchBalance(_apiKey, signal) {
+  async fetchBalance(credential, signal) {
+    const cookie = normalizeQwenCookie(credential ?? "")
+    // 没有可用 Cookie（或误粘贴了 API key）→ 回退官方 CLI 的 device-flow 登录态
+    if (looksLikeQwenCookie(cookie)) return fetchQwenConsoleQuota(cookie, signal)
     const stdout = await runQwenCli(["usage", "summary", "--format", "json"], signal)
     let parsed: unknown
     try {

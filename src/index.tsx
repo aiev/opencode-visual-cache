@@ -22,7 +22,7 @@ import type {
 } from "@opencode-ai/sdk/v2"
 import { createMemo, createSignal, createEffect, onMount, onCleanup, Show, For, untrack } from "solid-js"
 import { PLUGIN_VERSION } from "./_version"
-import { balanceProviders, getBalanceProvider, maskKey, matchBalanceProvider, type BalanceEntry, type BalanceProvider } from "./balance-providers"
+import { balanceCredentialKey, balanceProviders, getBalanceProvider, maskKey, matchBalanceProvider, type BalanceEntry, type BalanceProvider } from "./balance-providers"
 import { LANG_META, createT, detectLang, type LangCode } from "./i18n"
 import {
   MAX_SAT, FALLBACK, CURRENCIES, DEFAULT_RATES,
@@ -592,9 +592,9 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
 
   const pollBalance = async () => {
     const provider = getBalanceProvider(balanceProviderId())
-    // 手动配置的 key 优先；缺失时自动复用 OpenCode 已认证的 key（auth.json / config）
-    const key = api.kv.get<string>(`${KV_PREFIX}.balance.${provider.id}.key`, "")
-      || findOpencodeKey(api, provider)
+    // 手动配置的凭据优先；需要 key 的 provider 缺失时自动复用 OpenCode 已认证的 key
+    const key = api.kv.get<string>(balanceCredentialKey(KV_PREFIX, provider), "")
+      || (provider.requiresKey !== false ? findOpencodeKey(api, provider) : "")
     if (balanceUnsupported()) { setBalanceState({ status: "idle", data: null, lastFetch: 0, error: undefined, key: undefined }); return }
     // requiresKey === false：quota 来自外部登录态（如 qwencloud CLI），无 key 也照常查询
     if (!key && provider.requiresKey !== false) { setBalanceState({ status: "idle", data: null, lastFetch: 0, error: undefined, key: undefined }); return }
@@ -634,13 +634,13 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
   const balanceTimer = setInterval(pollBalance, BALANCE_POLL_MS)
   api.lifecycle.onDispose(() => clearInterval(balanceTimer))
 
-  /** 菜单中 provider 选项标题：标注 key 来源（手动配置 / OpenCode 自动复用 / 外部 CLI / 未配置）。 */
+  /** 菜单中 provider 选项标题：标注凭据来源（手动配置 / OpenCode 自动复用 / 外部 CLI / 未配置）。 */
   const providerOptionTitle = (p: BalanceProvider, current?: string) => {
     const t = createT(() => langCode())
-    const hasManual = !!api.kv.get<string>(`${KV_PREFIX}.balance.${p.id}.key`, "")
+    const hasManual = !!api.kv.get<string>(balanceCredentialKey(KV_PREFIX, p), "")
     const hasAuto = !hasManual && p.requiresKey !== false && !!findOpencodeKey(api, p)
     const mark = hasManual
-      ? t("keyUser")
+      ? t(p.keySourceLabel ?? "keyUser")
       : p.requiresKey === false
         ? t("keyCli")
         : hasAuto
@@ -649,21 +649,26 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
     return p.name + mark + (current && p.id === current ? " *" : "")
   }
 
-  /** 弹出指定 provider 的 API Key 输入框（脱敏预填；空清除 / 含 * 保留原 key / 新 key 实时刷新）。 */
+  /** 弹出指定 provider 的凭据输入框（脱敏预填；空清除 / 含 * 保留原值 / 新值实时刷新）。 */
   const promptBalanceKey = (dialog: TuiDialogStack | undefined, provider: BalanceProvider) => {
     const t = createT(() => langCode())
-    // requiresKey === false：登录态在外部 CLI，粘贴 key 无用，直接给操作提示
-    if (provider.requiresKey === false) {
+    // requiresKey === false 且没有可选凭据：登录态在外部 CLI，粘贴 key 无用，直接给操作提示
+    if (provider.requiresKey === false && !provider.optionalKeyPrompt) {
       api.ui.toast({ message: t("balCliHint", { p: provider.name }) })
       dialog?.clear()
       return
     }
-    const current = api.kv.get<string>(`${KV_PREFIX}.balance.${provider.id}.key`, "")
+    const slot = balanceCredentialKey(KV_PREFIX, provider)
+    const current = api.kv.get<string>(slot, "")
     const masked = maskKey(current)
+    const optional = provider.requiresKey === false && provider.optionalKeyPrompt
     dialog?.replace(() => (
       <api.ui.DialogPrompt
         title={provider.name}
-        description={() => <text>{t("balKeyPrompt", { p: provider.name })}</text>}
+        description={() => <text>{optional
+          ? `${t(provider.optionalKeyPrompt!)}
+${t("balCookieHelp")}`
+          : t("balKeyPrompt", { p: provider.name })}</text>}
         placeholder={provider.keyPlaceholder ?? "sk-..."}
         value={masked}
         onConfirm={(val) => {
@@ -676,7 +681,7 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
           } else {
             key = input
           }
-          api.kv.set(`${KV_PREFIX}.balance.${provider.id}.key`, key)
+          api.kv.set(slot, key)
           setBalanceRefresh(v => v + 1)
           if (key) {
             api.ui.toast({ message: t("keySaved") })

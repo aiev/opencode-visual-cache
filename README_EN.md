@@ -146,8 +146,8 @@ The plugin supports slash commands and command palette (`Ctrl + P`) for runtime 
 | `/cache-section` | Toggle sections & border | Independently show/hide Detail, Model & Pricing, Token Distribution, Loaded Skills, Balance, Bottom Bar, or the panel border (Bottom Bar is off by default on opencode 1.x; turning it on requires a TUI restart) |
 | `/cache-config` | View current config | Displays currency, rate, and section visibility |
 | `/cache-lang` | Switch display language | Pick Chinese or English from the dialog — takes effect immediately, no restart needed |
-| `/cache-balance` | Balance query settings | Pick a balance provider (menu shows key source: user key / OpenCode / qwencloud CLI / not set) / toggle auto-switch |
-| `/cache-balance-key` | Set balance API key | Two-step flow: pick a provider → enter the API key |
+| `/cache-balance` | Balance query settings | Pick a balance provider (menu shows credential source: user key / OpenCode / console cookie / qwencloud CLI / not set) / toggle auto-switch |
+| `/cache-balance-key` | Set balance credential | Two-step flow: pick a provider → enter the API key (QwenCloud Token Plan takes the console cookie; leave empty to fall back to the CLI) |
 
 <div align="center">
   <img src="https://raw.githubusercontent.com/Hotakus/opencode-visual-cache/master/assets/splash_cmd.png" alt="Slash command" width="49%"></img>
@@ -204,15 +204,20 @@ Supported balance providers:
 | SiliconFlow | `https://api.siliconflow.cn/v1/user/info` | CNY | `sk-` | ✅ Supported |
 | OpenRouter | `https://openrouter.ai/api/v1/credits` | USD | `sk-or-` | ✅ Supported |
 | Moonshot | `https://api.moonshot.cn/v1/users/me/balance` | CNY | `sk-` | ✅ Supported |
-| QwenCloud Token Plan | `qwencloud usage summary --format json` (official CLI subprocess) | Credits | CLI login (`qwencloud auth login`) | ✅ Supported |
+| QwenCloud Token Plan | Console gateway (`home.qwencloud.com` + `cs-data.qwencloud.com`, browser cookie) / fallback `qwencloud usage summary` CLI | Credits | Optional cookie, or CLI login | ✅ Supported |
 | Zhipu GLM | Pending (community-reversed endpoint, unofficial) | CNY | — | ⏳ Planned |
 | xAI | Pending (requires Management Key + Team ID) | USD | — | ⏳ Planned |
 
 > **Key source**: a key set manually via `/cache-balance-key` takes priority; otherwise the plugin reuses the credential OpenCode already authenticated (`/connect`-configured providers). Providers with neither cannot show a balance.
 >
-> **Key-free provider (QwenCloud Token Plan)**: the Token Plan `sk-sp-*` key is inference-only — every billing route answers `ConsoleNeedLogin`, so quota cannot be queried with it. The plugin instead runs the official `@qwencloud/qwencloud-cli` (`usage summary`) and reuses its device-flow login to read the Credits quota (`remainingCredits / totalCredits`). Install it with `npm install -g @qwencloud/qwencloud-cli` and run `qwencloud auth login` once. Missing CLI shows "qwencloud CLI not installed"; a stale session shows "Run `qwencloud auth login` first"; an account without the subscription (`subscribed: false`, or all-zero credits) shows "No Token Plan on the CLI account" — re-login with the account that owns it (`qwencloud auth logout && qwencloud auth login`). The menu marks this provider as "(qwencloud CLI)" and `/cache-balance-key` is a no-op for it.
+> **QwenCloud Token Plan (login state, not an API key)**: the Token Plan `sk-sp-*` key is inference-only — every billing route answers `ConsoleNeedLogin`, so quota cannot be queried with it. Two sources are available:
 >
-> **Key storage**: manually configured API keys are stored in plaintext in the plugin's persistent KV — avoid using on shared devices.
+> 1. **Console cookie (the only working source for Individual plans; preferred)**: run `/cache-balance-key`, pick QwenCloud Token Plan, paste your browser cookie. The plugin calls the console gateway's `tokenplan/personal/api/v2/{usage,subscription,quota-config}` and merges the window percentage with the plan ceiling (Pro = 180,000 Credits/month) into one line: `Token Plan 98.5%` plus `remaining / total`. To get the cookie: sign in to `home.qwencloud.com` in a browser → F12 → Network → any request → copy the whole `cookie` request header (the essential `login_qwencloud_ticket` is httpOnly, so `document.cookie` cannot read it). When the session expires the panel shows "Console cookie expired — copy it again"; paste a fresh one.
+> 2. **Official CLI (fallback when no cookie is set)**: `npm install -g @qwencloud/qwencloud-cli` and run `qwencloud auth login` once; the plugin reads the `token_plan` snapshot from `usage summary` (`remainingCredits / totalCredits`). Missing CLI shows "qwencloud CLI not installed"; a stale session shows "Run `qwencloud auth login` first"; an account without the subscription (`subscribed: false`, or all-zero credits) shows "No Token Plan on the CLI account" — re-login with the account that owns it (`qwencloud auth logout && qwencloud auth login`). Known gap: for gray-cohort accounts the CLI only queries the Team seat endpoint, so an **Individual subscription is reported as `subscribed: false`** ([QwenCloud/qwencloud-cli#13](https://github.com/QwenCloud/qwencloud-cli/issues/13)) — Individual users should use source 1.
+>
+> In the menu this provider is labelled "(qwencloud CLI)" until a cookie is configured, then "(console cookie)".
+>
+> **Key storage**: manually configured API keys and the QwenCloud console cookie are stored in plaintext in the plugin's persistent KV — avoid using on shared devices. The cookie is only ever sent to `home.qwencloud.com` / `cs-data.qwencloud.com`, is never logged, and the UI shows it masked like any other key.
 >
 > **Auto-switch**: enabled by default; picking a provider manually disables it — re-enable anytime via `/cache-balance`. Auto-switch matches the current session's model provider; a provider without a key shows a "not set" hint when selected.
 >

@@ -9,7 +9,7 @@ import { StatusView } from "./status"
 import { mapTheme } from "./theme"
 import { makeCommands, findOpencodeKeyV2 } from "./commands"
 import { credentialsDbReady } from "./credentials"
-import { getBalanceProvider } from "../balance-providers"
+import { balanceCredentialKey, getBalanceProvider } from "../balance-providers"
 import { LANG_META, detectLang, type LangCode } from "../i18n"
 
 const KV_PREFIX = "cache_panel"
@@ -97,8 +97,8 @@ function PluginRoot(props: {
   // ── 余额轮询（对齐 V1 tui() pollBalance）：手动 key 优先，缺失时自动复用 OpenCode 已认证 key ──
   const pollBalance = async () => {
     const provider = getBalanceProvider(props.signals.balanceProviderId())
-    let key = props.api.kv.get<string>(`${KV_PREFIX}.balance.${provider.id}.key`, "")
-    if (!key) {
+    let key = props.api.kv.get<string>(balanceCredentialKey(KV_PREFIX, provider), "") ?? ""
+    if (!key && provider.requiresKey !== false) {
       // V2 凭据保存在宿主 SQLite：等库就绪再解析，避免首轮回退到过期的 auth.json
       await credentialsDbReady()
       key = findOpencodeKeyV2(props.context, provider)

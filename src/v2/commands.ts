@@ -1,7 +1,7 @@
 import type { Context, KeymapCommand } from "./types"
 import type { PanelApi, PanelSignals } from "../panel/panel-api"
 import { CURRENCIES, DEFAULT_RATES, visualPadEnd } from "../core"
-import { balanceProviders, getBalanceProvider, maskKey, type BalanceProvider } from "../balance-providers"
+import { balanceCredentialKey, balanceProviders, getBalanceProvider, maskKey, type BalanceProvider } from "../balance-providers"
 import { LANG_META, createT, type LangCode } from "../i18n"
 import { resolveCredentialToken } from "./credentials"
 
@@ -54,12 +54,12 @@ function currentSessionID(context: Context): string {
 export function makeCommands(context: Context, api: PanelApi, signals: PanelSignals): KeymapCommand[] {
   const t = () => createT(() => signals.langCode())
 
-  /** 菜单中 provider 选项标题：标注 key 来源（手动配置 / OpenCode 自动复用 / 外部 CLI / 未配置）。 */
+  /** 菜单中 provider 选项标题：标注凭据来源（手动配置 / OpenCode 自动复用 / 外部 CLI / 未配置）。 */
   const providerOptionTitle = (p: BalanceProvider, current?: string) => {
-    const hasManual = !!api.kv.get<string>(`${KV_PREFIX}.balance.${p.id}.key`, "")
+    const hasManual = !!api.kv.get<string>(balanceCredentialKey(KV_PREFIX, p), "")
     const hasAuto = !hasManual && p.requiresKey !== false && !!findOpencodeKeyV2(context, p)
     const mark = hasManual
-      ? t()("keyUser")
+      ? t()(p.keySourceLabel ?? "keyUser")
       : p.requiresKey === false
         ? t()("keyCli")
         : hasAuto
@@ -68,17 +68,22 @@ export function makeCommands(context: Context, api: PanelApi, signals: PanelSign
     return p.name + mark + (current && p.id === current ? " *" : "")
   }
 
-  /** 弹出指定 provider 的 API Key 输入框（空清除 / 含 * 保留原 key / 新 key 实时刷新）。 */
+  /** 弹出指定 provider 的凭据输入框（空清除 / 含 * 保留原值 / 新值实时刷新）。 */
   const promptBalanceKey = async (provider: BalanceProvider): Promise<void> => {
-    // requiresKey === false：登录态在外部 CLI，粘贴 key 无用，直接给操作提示
-    if (provider.requiresKey === false) {
+    // requiresKey === false：登录态在外部 CLI，粘贴 key 无用，直接给操作提示；
+    // 配置了 optionalKeyPrompt 的 provider（如 qwencloud）仍接受可选 Cookie 输入
+    if (provider.requiresKey === false && !provider.optionalKeyPrompt) {
       context.ui.toast.show({ message: t()("balCliHint", { p: provider.name }) })
       return
     }
-    const current = api.kv.get<string>(`${KV_PREFIX}.balance.${provider.id}.key`, "") ?? ""
+    const slot = balanceCredentialKey(KV_PREFIX, provider)
+    const current = api.kv.get<string>(slot, "") ?? ""
+    const optional = provider.requiresKey === false && provider.optionalKeyPrompt
     const val = await context.ui.dialog.prompt({
       title: provider.name,
-      description: t()("balKeyPrompt", { p: provider.name }),
+      description: optional
+        ? `${t()(provider.optionalKeyPrompt!)} ${t()("balCookieHelp")}`
+        : t()("balKeyPrompt", { p: provider.name }),
       placeholder: provider.keyPlaceholder ?? "sk-...",
     })
     if (val === undefined) return // 取消
@@ -91,7 +96,7 @@ export function makeCommands(context: Context, api: PanelApi, signals: PanelSign
     } else {
       key = input
     }
-    await api.kv.set(`${KV_PREFIX}.balance.${provider.id}.key`, key)
+    await api.kv.set(slot, key)
     signals.setBalanceRefresh(signals.balanceRefresh() + 1)
     context.ui.toast.show({ message: key ? t()("keySaved") : t()("keyCleared") })
   }
@@ -298,10 +303,13 @@ export function makeCommands(context: Context, api: PanelApi, signals: PanelSign
           signals.setBalanceUnsupported(false)
           // 切换后立即按新 provider 刷新显示（无 key 时显示 idle，避免残留上一 provider 余额）
           signals.setBalanceRefresh(signals.balanceRefresh() + 1)
-          const hasKey = !!api.kv.get<string>(`${KV_PREFIX}.balance.${provider.id}.key`, "")
-          if (!hasKey) {
-            // 未配置 key → 进入设置流程（对话框保持打开等待输入）
+          const hasKey = !!api.kv.get<string>(balanceCredentialKey(KV_PREFIX, provider), "")
+          if (!hasKey && (provider.requiresKey !== false || provider.optionalKeyPrompt)) {
+            // 未配置凭据 → 进入设置流程（对话框保持打开等待输入）
             await promptBalanceKey(provider)
+          } else if (!hasKey) {
+            // 免凭据 provider（登录态在外部 CLI）：只给操作提示
+            context.ui.toast.show({ message: t()("balCliHint", { p: provider.name }) })
           } else {
             context.ui.toast.show({ message: t()("providerManual", { p: provider.name }) })
           }
