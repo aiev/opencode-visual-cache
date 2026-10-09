@@ -542,14 +542,21 @@ export function parseQwenTokenPlanUsage(raw: unknown, nowMs = Date.now()): Balan
     : typeof plan.specCode === "string" && plan.specCode.length > 0 ? plan.specCode : ""
   if (planName) details.push({ key: "plan", value: planName.toUpperCase() })
   if (total !== undefined) {
-    details.push({ key: "credits", value: remaining === undefined ? formatCreditAmount(total) : `${formatCreditAmount(remaining)} / ${formatCreditAmount(total)}` })
+    // Credits 行给套餐额度上限（对齐控制台的 "Plan quota"），余量看 Remaining 行
+    details.push({ key: "credits", value: formatCreditAmount(total) })
   }
   const usedCredits = total !== undefined && total > 0 && remaining !== undefined ? Math.max(0, total - remaining) : undefined
   if (usedPct !== undefined) {
     const usedPctText = `${formatPercent(usedPct)}%`
     details.push({ key: "used", value: usedCredits === undefined ? usedPctText : `${formatCreditAmount(usedCredits)} / ${usedPctText}` })
   }
-  if (remainingPct !== undefined) details.push({ key: "remaining", value: `${formatPercent(remainingPct)}%` })
+  if (remainingPct !== undefined) {
+    const remainingPctText = `${formatPercent(remainingPct)}%`
+    details.push({
+      key: "remaining",
+      value: usedCredits === undefined || remaining === undefined ? remainingPctText : `${formatCreditAmount(remaining)} / ${remainingPctText}`,
+    })
+  }
   const resetAfter = qwenResetSeconds(plan.resetDate ?? plan.reset_date ?? plan.next_reset_at, nowMs)
   if (resetAfter !== undefined) details.push({ key: "reset", value: String(resetAfter) })
 
@@ -799,27 +806,28 @@ export function parseQwenConsoleQuota(snapshot: QwenConsoleSnapshot, nowMs = Dat
   const details: BalanceDetail[] = []
   if (spec) details.push({ key: "plan", value: spec.toUpperCase() })
 
-  // Credits 行对齐控制台的 "Plan quota"：取上限最大的窗口（个人版即月度额度）
+  // Credits 行对齐控制台的 "Plan quota"：只给套餐额度上限，取上限最大的窗口（个人版即月度额度）
   const withCeiling = windows.filter((window) => (window.ceiling ?? 0) > 0)
   const primary = withCeiling.length > 0 ? withCeiling.reduce((a, b) => ((b.ceiling ?? 0) > (a.ceiling ?? 0) ? b : a)) : undefined
   const remainingCredits = primary ? Math.round((primary.ceiling ?? 0) * (primary.remainingPct / 100)) : undefined
   if (primary && remainingCredits !== undefined) {
-    details.push({
-      key: "credits",
-      value: `${formatCreditAmount(remainingCredits)} / ${formatCreditAmount(primary.ceiling ?? 0)}`,
-      ...scope(primary),
-    })
+    details.push({ key: "credits", value: formatCreditAmount(primary.ceiling ?? 0), ...scope(primary) })
   }
   for (const window of windows) {
-    // Used 行同时给出 Credits 用量与百分比（有该窗口上限时），省去再去换算
-    const usedCredits = (window.ceiling ?? 0) > 0 ? Math.round((window.ceiling ?? 0) * window.usedPct / 100) : undefined
+    // Used / Remaining 两行都把 Credits 和百分比并列，省得手工换算
+    const ceiling = (window.ceiling ?? 0) > 0 ? window.ceiling ?? 0 : undefined
     const usedPct = `${formatPercent(window.usedPct)}%`
+    const remainingPct = `${formatPercent(window.remainingPct)}%`
     details.push({
       key: "used",
-      value: usedCredits === undefined ? usedPct : `${formatCreditAmount(usedCredits)} / ${usedPct}`,
+      value: ceiling === undefined ? usedPct : `${formatCreditAmount(Math.round(ceiling * window.usedPct / 100))} / ${usedPct}`,
       ...scope(window),
     })
-    details.push({ key: "remaining", value: `${formatPercent(window.remainingPct)}%`, ...scope(window) })
+    details.push({
+      key: "remaining",
+      value: ceiling === undefined ? remainingPct : `${formatCreditAmount(Math.round(ceiling * window.remainingPct / 100))} / ${remainingPct}`,
+      ...scope(window),
+    })
     if (window.resetAfter !== undefined) details.push({ key: "reset", value: String(window.resetAfter), ...scope(window) })
   }
 
