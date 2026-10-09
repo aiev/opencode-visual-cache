@@ -815,6 +815,7 @@ export function TokenCachePanel(props: {
                     if (code === "TIMEOUT") return t("balErrTimeout")
                     if (code === "CLI") return t("balErrCli")
                     if (code === "AUTH") return t("balErrAuth")
+                    if (code === "NOPLAN") return t("balErrNoPlan")
                     return t("balError") + (code ? ` (${code})` : "")
                   })()}</span>
                 </text>

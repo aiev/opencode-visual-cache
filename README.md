@@ -210,7 +210,7 @@ npm install -g opencode-visual-cache@latest
 
 > **Key 来源**：优先使用 `/cache-balance-key` 手动配置的 Key；未手动配置时自动复用 OpenCode 已认证的凭据（`/connect` 配置的 provider）。两者都没有的提供商无法查询余额。
 >
-> **免 Key 提供商（QwenCloud Token Plan）**：Token Plan 的 `sk-sp-*` 专用 key 只做推理，billing 路由一律返回 `ConsoleNeedLogin`，quota 无法用 key 查询。插件改为调用官方 `@qwencloud/qwencloud-cli` 的 `usage summary`，复用其 device-flow 登录态读取 Credits 额度（`remainingCredits / totalCredits`）。需要先 `npm install -g @qwencloud/qwencloud-cli` 并执行一次 `qwencloud auth login`；未安装 CLI 显示「未安装 qwencloud CLI」，未登录显示「请先运行 qwencloud auth login」。该提供商在菜单中标注为「（qwencloud CLI）」，`/cache-balance-key` 对它无操作。
+> **免 Key 提供商（QwenCloud Token Plan）**：Token Plan 的 `sk-sp-*` 专用 key 只做推理，billing 路由一律返回 `ConsoleNeedLogin`，quota 无法用 key 查询。插件改为调用官方 `@qwencloud/qwencloud-cli` 的 `usage summary`，复用其 device-flow 登录态读取 Credits 额度（`remainingCredits / totalCredits`）。需要先 `npm install -g @qwencloud/qwencloud-cli` 并执行一次 `qwencloud auth login`；未安装 CLI 显示「未安装 qwencloud CLI」，未登录显示「请先运行 qwencloud auth login」，登录账号本身没有订阅（`subscribed: false` 或额度全 0）显示「CLI 登录账号没有 Token Plan」——此时用拥有该订阅的账号 `qwencloud auth logout && qwencloud auth login` 重新登录。该提供商在菜单中标注为「（qwencloud CLI）」，`/cache-balance-key` 对它无操作。
 >
 > **Key 存储**：手动配置的 API Key 明文保存于插件持久化 KV，请勿在共享设备上使用。
 >

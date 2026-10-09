@@ -491,11 +491,15 @@ export function parseQwenTokenPlanUsage(raw: unknown, nowMs = Date.now()): Balan
   // 兼容 CLI 的 {meta,data} 信封与顶层直出两种形态
   const json = asRecord(root.data) ?? root
   const plan = asRecord(json.token_plan) ?? asRecord(asRecord(root.token_plan))
-  if (!plan || plan.subscribed === false) throw new BalanceError("EMPTY")
+  if (!plan) throw new BalanceError("EMPTY")
+  // 登录账号没有订阅（usage summary 的 subscribed=false / totalCredits=0 也是这种状态）：
+  // 与"接口没返回数据"分开提示，避免用户以为插件坏了，其实是登录账号不对
+  if (plan.subscribed === false) throw new BalanceError("NOPLAN")
 
   const total = asFiniteNumber(plan.totalCredits) ?? asFiniteNumber(plan.total_credits)
   const remaining = asFiniteNumber(plan.remainingCredits) ?? asFiniteNumber(plan.remaining_credits)
   if (total === undefined && remaining === undefined) throw new BalanceError("EMPTY")
+  if ((total ?? 0) <= 0 && (remaining ?? 0) <= 0) throw new BalanceError("NOPLAN")
 
   const usedPct = asFiniteNumber(plan.usedPct) ?? asFiniteNumber(plan.used_pct)
   const remainingPct = total !== undefined && total > 0 && remaining !== undefined

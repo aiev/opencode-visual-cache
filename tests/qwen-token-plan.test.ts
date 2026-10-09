@@ -63,8 +63,9 @@ assert.equal(remainingOnly.display, "42.5 Credits")
 assert.equal(findDetail(remainingOnly.details, "used"), undefined)
 assert.equal(findDetail(remainingOnly.details, "remaining"), undefined)
 
-// 无订阅 / 缺字段 / 非对象 → EMPTY（面板显示"未获取到数据"，不显示假额度）
-assert.throws(() => parseQwenTokenPlanUsage({ token_plan: { subscribed: false } }, nowMs), /EMPTY/)
+// 无订阅 / 额度全 0（登录账号没有 Token Plan）→ NOPLAN；缺字段 / 非对象 → EMPTY
+assert.throws(() => parseQwenTokenPlanUsage({ token_plan: { subscribed: false, planName: "Token Plan", totalCredits: 0, remainingCredits: 0, usedPct: 0 } }, nowMs), /NOPLAN/)
+assert.throws(() => parseQwenTokenPlanUsage({ token_plan: { subscribed: true, totalCredits: 0, remainingCredits: 0, usedPct: 0 } }, nowMs), /NOPLAN/)
 assert.throws(() => parseQwenTokenPlanUsage({ pay_as_you_go: { total: { cost: 1 } } }, nowMs), /EMPTY/)
 assert.throws(() => parseQwenTokenPlanUsage({ token_plan: { subscribed: true } }, nowMs), /EMPTY/)
 assert.throws(() => parseQwenTokenPlanUsage(null, nowMs), /EMPTY/)
