@@ -44,7 +44,7 @@ assert.equal(monthly.total, "18000")
 assert.equal(monthly.display, "Token Plan 72%")
 assert.equal(findDetail(monthly.details, "plan")?.value, "TOKEN PLAN")
 assert.equal(findDetail(monthly.details, "credits")?.value, "18000 / 25000")
-assert.equal(findDetail(monthly.details, "used")?.value, "28%")
+assert.equal(findDetail(monthly.details, "used")?.value, "7000 / 28%")
 assert.equal(findDetail(monthly.details, "remaining")?.value, "72%")
 assert.equal(findDetail(monthly.details, "reset")?.value, String(resetSeconds))
 
@@ -185,7 +185,7 @@ assert.equal(consoleEntry.total, "177216")
 assert.equal(consoleEntry.display, "Token Plan 98.5%")
 assert.equal(findDetail(consoleEntry.details, "plan")?.value, "PRO")
 assert.equal(findDetail(consoleEntry.details, "credits")?.value, "177216 / 180000")
-assert.equal(findDetail(consoleEntry.details, "used")?.value, "1.5%")
+assert.equal(findDetail(consoleEntry.details, "used")?.value, "2784 / 1.5%")
 assert.equal(findDetail(consoleEntry.details, "remaining")?.value, "98.5%")
 assert.equal(findDetail(consoleEntry.details, "reset")?.value, String(monthReset))
 // 单窗口不带 windowSeconds，避免标签噪音
@@ -212,6 +212,12 @@ assert.deepEqual(remainingByWindow.map((d) => [d.windowSeconds, d.value]), [
   [2_592_000, "50%"],
 ])
 assert.equal(findDetail(multi.details, "credits")?.windowSeconds, 2_592_000)
+// Used 逐窗口带上 Credits：5 小时有上限（12000），每周无上限只给百分比，月度有上限（180000）
+assert.deepEqual(multi.details.filter((d) => d.key === "used").map((d) => [d.windowSeconds, d.value]), [
+  [18_000, "3000 / 25%"],
+  [604_800, "40%"],
+  [2_592_000, "90000 / 50%"],
+])
 
 // 已是百分数（> 1）与未知套餐（无上限）：仍显示百分比，不猜 Credits
 const rawPercent = parseQwenConsoleQuota({
@@ -221,6 +227,7 @@ const rawPercent = parseQwenConsoleQuota({
 }, nowMs)[0]
 assert.equal(rawPercent.display, "Token Plan 87.5%")
 assert.equal(findDetail(rawPercent.details, "credits")?.value, "157500 / 180000")
+assert.equal(findDetail(rawPercent.details, "used")?.value, "22500 / 12.5%")
 
 const unknownSpec = parseQwenConsoleQuota({
   usage: consoleUsage,
@@ -229,6 +236,7 @@ const unknownSpec = parseQwenConsoleQuota({
 }, nowMs)[0]
 assert.equal(unknownSpec.total, "0")
 assert.equal(findDetail(unknownSpec.details, "credits"), undefined)
+assert.equal(findDetail(unknownSpec.details, "used")?.value, "1.5%")
 assert.equal(unknownSpec.display, "Token Plan 98.5%")
 
 // 订阅过期 → NOPLAN；没有窗口字段 → EMPTY

@@ -544,7 +544,11 @@ export function parseQwenTokenPlanUsage(raw: unknown, nowMs = Date.now()): Balan
   if (total !== undefined) {
     details.push({ key: "credits", value: remaining === undefined ? formatCreditAmount(total) : `${formatCreditAmount(remaining)} / ${formatCreditAmount(total)}` })
   }
-  if (usedPct !== undefined) details.push({ key: "used", value: `${formatPercent(usedPct)}%` })
+  const usedCredits = total !== undefined && total > 0 && remaining !== undefined ? Math.max(0, total - remaining) : undefined
+  if (usedPct !== undefined) {
+    const usedPctText = `${formatPercent(usedPct)}%`
+    details.push({ key: "used", value: usedCredits === undefined ? usedPctText : `${formatCreditAmount(usedCredits)} / ${usedPctText}` })
+  }
   if (remainingPct !== undefined) details.push({ key: "remaining", value: `${formatPercent(remainingPct)}%` })
   const resetAfter = qwenResetSeconds(plan.resetDate ?? plan.reset_date ?? plan.next_reset_at, nowMs)
   if (resetAfter !== undefined) details.push({ key: "reset", value: String(resetAfter) })
@@ -807,7 +811,14 @@ export function parseQwenConsoleQuota(snapshot: QwenConsoleSnapshot, nowMs = Dat
     })
   }
   for (const window of windows) {
-    details.push({ key: "used", value: `${formatPercent(window.usedPct)}%`, ...scope(window) })
+    // Used 行同时给出 Credits 用量与百分比（有该窗口上限时），省去再去换算
+    const usedCredits = (window.ceiling ?? 0) > 0 ? Math.round((window.ceiling ?? 0) * window.usedPct / 100) : undefined
+    const usedPct = `${formatPercent(window.usedPct)}%`
+    details.push({
+      key: "used",
+      value: usedCredits === undefined ? usedPct : `${formatCreditAmount(usedCredits)} / ${usedPct}`,
+      ...scope(window),
+    })
     details.push({ key: "remaining", value: `${formatPercent(window.remainingPct)}%`, ...scope(window) })
     if (window.resetAfter !== undefined) details.push({ key: "reset", value: String(window.resetAfter), ...scope(window) })
   }
