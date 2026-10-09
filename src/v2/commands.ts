@@ -54,20 +54,27 @@ function currentSessionID(context: Context): string {
 export function makeCommands(context: Context, api: PanelApi, signals: PanelSignals): KeymapCommand[] {
   const t = () => createT(() => signals.langCode())
 
-  /** 菜单中 provider 选项标题：标注 key 来源（手动配置 / OpenCode 自动复用 / 未配置）。 */
+  /** 菜单中 provider 选项标题：标注 key 来源（手动配置 / OpenCode 自动复用 / 外部 CLI / 未配置）。 */
   const providerOptionTitle = (p: BalanceProvider, current?: string) => {
     const hasManual = !!api.kv.get<string>(`${KV_PREFIX}.balance.${p.id}.key`, "")
-    const hasAuto = !hasManual && !!findOpencodeKeyV2(context, p)
+    const hasAuto = !hasManual && p.requiresKey !== false && !!findOpencodeKeyV2(context, p)
     const mark = hasManual
       ? t()("keyUser")
-      : hasAuto
-        ? t()("keyOpenCode")
-        : t()("keyNotSet")
+      : p.requiresKey === false
+        ? t()("keyCli")
+        : hasAuto
+          ? t()("keyOpenCode")
+          : t()("keyNotSet")
     return p.name + mark + (current && p.id === current ? " *" : "")
   }
 
   /** 弹出指定 provider 的 API Key 输入框（空清除 / 含 * 保留原 key / 新 key 实时刷新）。 */
   const promptBalanceKey = async (provider: BalanceProvider): Promise<void> => {
+    // requiresKey === false：登录态在外部 CLI，粘贴 key 无用，直接给操作提示
+    if (provider.requiresKey === false) {
+      context.ui.toast.show({ message: t()("balCliHint", { p: provider.name }) })
+      return
+    }
     const current = api.kv.get<string>(`${KV_PREFIX}.balance.${provider.id}.key`, "") ?? ""
     const val = await context.ui.dialog.prompt({
       title: provider.name,

@@ -2,6 +2,12 @@
 // Balance providers — pluggable account-balance query adapters.
 // ---------------------------------------------------------------------------
 
+/** 宿主运行时（Bun/Node）注入；用于按需取 node:child_process（见 runQwenCli）。 */
+declare const process: {
+  env: Record<string, string | undefined>
+  getBuiltinModule?: (id: string) => unknown
+} | undefined
+
 /** 归一化后的余额条目——显示层与具体 provider 解耦。 */
 export interface BalanceEntry {
   currency: string   // 原生币种（CNY/USD…），复用现有汇率换算
@@ -26,6 +32,10 @@ export interface BalanceProvider {
   id: string                    // 唯一标识，同时用作 KV key 命名空间
   name: string                  // 显示名（专有名词，无需 i18n）
   keyPlaceholder?: string       // key 输入框占位（如 "sk-..."）
+  /** OpenCode providerID 别名（如 alibaba-token-plan → qwencloud）；支持前缀匹配。 */
+  aliases?: readonly string[]
+  /** false = 不依赖 API key（凭据由外部登录态提供，如 qwencloud CLI）。默认需要 key。 */
+  requiresKey?: boolean
   fetchBalance(apiKey: string, signal?: AbortSignal): Promise<BalanceEntry[]>
 }
 
@@ -396,8 +406,146 @@ const openaiProvider: BalanceProvider = {
   },
 }
 
+// ---------------------------------------------------------------------------
+// QwenCloud Token Plan — Credits quota through the official `qwencloud` CLI.
+//
+// Token Plan 的 `sk-sp-*` key 只做推理：billing 路由一律 `ConsoleNeedLogin`，
+// 无法用 key 查询 quota（官方 FAQ + CodexBar#2328 实测）。quota 只有两个来源：
+// 控制台 Cookie（未文档化）或官方 CLI 的 device-flow 登录态。这里走后者——
+// `qwencloud usage summary --format json` 的 `token_plan` 快照（文档字段：
+// totalCredits / remainingCredits / usedPct / resetDate / planName / status）。
+// ---------------------------------------------------------------------------
+
+const QWEN_CLI = "qwencloud"
+const QWEN_CLI_TIMEOUT_MS = 8_000 // 面板轮询 10s 超时之内，留解析余量
+
+interface ChildProcessModule {
+  execFile(
+    file: string,
+    args: readonly string[],
+    options: Record<string, unknown>,
+    callback: (error: (Error & { code?: unknown; killed?: boolean }) | null, stdout: string, stderr: string) => void,
+  ): unknown
+}
+
+/** 取 node:child_process（Bun/Node 宿主）；宿主不提供时返回 undefined → CLI 缺失。 */
+function loadChildProcess(): ChildProcessModule | undefined {
+  const getter = typeof process !== "undefined" ? process.getBuiltinModule : undefined
+  if (!getter) return undefined
+  try {
+    const mod = getter("node:child_process") as ChildProcessModule | undefined
+    return mod && typeof mod.execFile === "function" ? mod : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 未登录/凭据过期的输出特征（CLI 文档：未登录 exit 2、`AUTH_REQUIRED`）。 */
+function looksUnauthenticated(output: string): boolean {
+  return /AUTH_REQUIRED|auth login|not logged|unauthori[sz]ed|token expired|ConsoleNeedLogin/i.test(output)
+}
+
+/** 运行 qwencloud CLI，返回 stdout；失败只抛错误码，不外泄输出。 */
+export function runQwenCli(args: readonly string[], signal?: AbortSignal): Promise<string> {
+  const child = loadChildProcess()
+  if (!child) return Promise.reject(new BalanceError("CLI"))
+  return new Promise<string>((resolve, reject) => {
+    if (signal?.aborted) { reject(new BalanceError("TIMEOUT")); return }
+    const handle = child.execFile(
+      QWEN_CLI,
+      [...args],
+      { timeout: QWEN_CLI_TIMEOUT_MS, maxBuffer: 1 << 20, encoding: "utf8" },
+      (error, stdout, stderr) => {
+        if (error && typeof error.code === "string" && error.code === "ENOENT") { reject(new BalanceError("CLI")); return }
+        if (error && error.killed) { reject(new BalanceError("TIMEOUT")); return }
+        const text = String(stdout ?? "")
+        if (error || looksUnauthenticated(`${text}${String(stderr ?? "")}`)) {
+          reject(new BalanceError(error && error.code === 2 ? "AUTH" : looksUnauthenticated(`${text}${String(stderr ?? "")}`) ? "AUTH" : "EMPTY"))
+          return
+        }
+        resolve(text)
+      },
+    ) as { kill?: (signal?: string) => unknown } | undefined
+    const abort = () => { try { handle?.kill?.("SIGKILL") } catch { /* 已退出 */ } }
+    signal?.addEventListener("abort", abort, { once: true })
+  })
+}
+
+/** 重置时间戳（ISO 字符串 / 秒 / 毫秒）→ 距今秒数。 */
+function qwenResetSeconds(value: unknown, nowMs: number): number | undefined {
+  const timestamp = asFiniteNumber(value)
+  let ms: number | undefined
+  if (timestamp !== undefined) ms = timestamp > 1e12 ? timestamp : timestamp * 1000
+  else if (typeof value === "string" && value.length > 0) {
+    const parsed = Date.parse(value)
+    if (Number.isFinite(parsed)) ms = parsed
+  }
+  if (ms === undefined) return undefined
+  return Math.max(0, Math.round((ms - nowMs) / 1000))
+}
+
+/** 解析 `qwencloud usage summary --format json` 的 token_plan 快照。 */
+export function parseQwenTokenPlanUsage(raw: unknown, nowMs = Date.now()): BalanceEntry[] {
+  const root = asRecord(raw)
+  if (!root) throw new BalanceError("EMPTY")
+  // 兼容 CLI 的 {meta,data} 信封与顶层直出两种形态
+  const json = asRecord(root.data) ?? root
+  const plan = asRecord(json.token_plan) ?? asRecord(asRecord(root.token_plan))
+  if (!plan || plan.subscribed === false) throw new BalanceError("EMPTY")
+
+  const total = asFiniteNumber(plan.totalCredits) ?? asFiniteNumber(plan.total_credits)
+  const remaining = asFiniteNumber(plan.remainingCredits) ?? asFiniteNumber(plan.remaining_credits)
+  if (total === undefined && remaining === undefined) throw new BalanceError("EMPTY")
+
+  const usedPct = asFiniteNumber(plan.usedPct) ?? asFiniteNumber(plan.used_pct)
+  const remainingPct = total !== undefined && total > 0 && remaining !== undefined
+    ? clampPercent((remaining / total) * 100)
+    : usedPct === undefined ? undefined : clampPercent(100 - usedPct)
+
+  const details: BalanceDetail[] = []
+  const planName = typeof plan.planName === "string" && plan.planName.length > 0
+    ? plan.planName
+    : typeof plan.specCode === "string" && plan.specCode.length > 0 ? plan.specCode : ""
+  if (planName) details.push({ key: "plan", value: planName.toUpperCase() })
+  if (total !== undefined) {
+    details.push({ key: "credits", value: remaining === undefined ? formatCreditAmount(total) : `${formatCreditAmount(remaining)} / ${formatCreditAmount(total)}` })
+  }
+  if (usedPct !== undefined) details.push({ key: "used", value: `${formatPercent(usedPct)}%` })
+  if (remainingPct !== undefined) details.push({ key: "remaining", value: `${formatPercent(remainingPct)}%` })
+  const resetAfter = qwenResetSeconds(plan.resetDate ?? plan.reset_date ?? plan.next_reset_at, nowMs)
+  if (resetAfter !== undefined) details.push({ key: "reset", value: String(resetAfter) })
+
+  const summary = remainingPct === undefined ? undefined : formatPercent(remainingPct)
+  return [{
+    currency: "CREDITS",
+    total: remaining === undefined ? "0" : formatCreditAmount(remaining),
+    // Credits 非货币，走 display 直出，避免被汇率换算
+    display: summary !== undefined
+      ? `Token Plan ${summary}%`
+      : remaining !== undefined ? `${formatCreditAmount(remaining)} Credits` : "Token Plan",
+    details,
+  }]
+}
+
+const qwencloudProvider: BalanceProvider = {
+  id: "qwencloud",
+  name: "QwenCloud Token Plan",
+  requiresKey: false, // 登录态在 qwencloud CLI，不消费 API key
+  aliases: ["alibaba-token-plan", "bailian-token-plan"],
+  async fetchBalance(_apiKey, signal) {
+    const stdout = await runQwenCli(["usage", "summary", "--format", "json"], signal)
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(stdout)
+    } catch {
+      throw new BalanceError("EMPTY")
+    }
+    return parseQwenTokenPlanUsage(parsed)
+  },
+}
+
 /** 已注册的 provider 列表（按需追加新适配器）。 */
-export const balanceProviders: BalanceProvider[] = [deepseekProvider, siliconflowProvider, openrouterProvider, moonshotProvider, hyperProvider, openaiProvider]
+export const balanceProviders: BalanceProvider[] = [deepseekProvider, siliconflowProvider, openrouterProvider, moonshotProvider, hyperProvider, openaiProvider, qwencloudProvider]
 
 /** 按 id 取 provider；未知 id 回退到第一个。 */
 export function getBalanceProvider(id: string): BalanceProvider {
@@ -406,13 +554,20 @@ export function getBalanceProvider(id: string): BalanceProvider {
 
 /**
  * 按 OpenCode providerID 匹配余额 provider。
- * 先精确匹配，再按前缀匹配（如 moonshotai-cn → moonshot）；未命中返回 undefined。
+ * 先精确匹配 id，再匹配 provider 别名（如 alibaba-token-plan → qwencloud），
+ * 最后按前缀匹配（如 moonshotai-cn → moonshot）；未命中返回 undefined。
  * 比较不区分大小写，容忍 providerID 的大小写变体。
  */
 export function matchBalanceProvider(providerId: string): BalanceProvider | undefined {
   const id = providerId.toLowerCase()
   const exact = balanceProviders.find((p) => p.id.toLowerCase() === id)
   if (exact) return exact
+  const aliased = balanceProviders.find((p) =>
+    (p.aliases ?? []).some((alias) => {
+      const value = alias.toLowerCase()
+      return id === value || id.startsWith(value)
+    }))
+  if (aliased) return aliased
   return balanceProviders.find((p) => id.startsWith(p.id.toLowerCase()))
 }
 

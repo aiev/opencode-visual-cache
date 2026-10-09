@@ -146,7 +146,7 @@ npm install -g opencode-visual-cache@latest
 | `/cache-section` | 开关区块与边框 | 独立控制 Token 明细 / 模型与定价 / 估算 Token 分布 / 已加载技能 / 余额 / 底部状态栏 / 面板边框的显隐（底部状态栏在 opencode 1.x 下默认关闭，开启需重启 TUI 生效） |
 | `/cache-config` | 查看当前配置 | 弹出当前货币、汇率、区块可见性状态 |
 | `/cache-lang` | 切换显示语言 | 从列表选择中文或 English，界面即时切换，无需重启 |
-| `/cache-balance` | 余额查询设置 | 选择余额提供商（菜单标注 Key 来源：用户 key / OpenCode / 未配置）/ 开关自动切换 |
+| `/cache-balance` | 余额查询设置 | 选择余额提供商（菜单标注 Key 来源：用户 key / OpenCode / qwencloud CLI / 未配置）/ 开关自动切换 |
 | `/cache-balance-key` | 设置余额 API Key | 两步流程：选择提供商 → 输入 API Key |
 
 <div align="center">
@@ -204,10 +204,13 @@ npm install -g opencode-visual-cache@latest
 | SiliconFlow | `https://api.siliconflow.cn/v1/user/info` | CNY | `sk-` | ✅ 已支持 |
 | OpenRouter | `https://openrouter.ai/api/v1/credits` | USD | `sk-or-` | ✅ 已支持 |
 | Moonshot | `https://api.moonshot.cn/v1/users/me/balance` | CNY | `sk-` | ✅ 已支持 |
+| QwenCloud Token Plan | `qwencloud usage summary --format json`（官方 CLI 子进程） | Credits | 需 CLI 登录态（`qwencloud auth login`） | ✅ 已支持 |
 | 智谱 GLM | 待接入（社区逆向端点，非官方） | CNY | — | ⏳ 希望支持 |
 | xAI | 待接入（需 Management Key + Team ID） | USD | — | ⏳ 希望支持 |
 
 > **Key 来源**：优先使用 `/cache-balance-key` 手动配置的 Key；未手动配置时自动复用 OpenCode 已认证的凭据（`/connect` 配置的 provider）。两者都没有的提供商无法查询余额。
+>
+> **免 Key 提供商（QwenCloud Token Plan）**：Token Plan 的 `sk-sp-*` 专用 key 只做推理，billing 路由一律返回 `ConsoleNeedLogin`，quota 无法用 key 查询。插件改为调用官方 `@qwencloud/qwencloud-cli` 的 `usage summary`，复用其 device-flow 登录态读取 Credits 额度（`remainingCredits / totalCredits`）。需要先 `npm install -g @qwencloud/qwencloud-cli` 并执行一次 `qwencloud auth login`；未安装 CLI 显示「未安装 qwencloud CLI」，未登录显示「请先运行 qwencloud auth login」。该提供商在菜单中标注为「（qwencloud CLI）」，`/cache-balance-key` 对它无操作。
 >
 > **Key 存储**：手动配置的 API Key 明文保存于插件持久化 KV，请勿在共享设备上使用。
 >

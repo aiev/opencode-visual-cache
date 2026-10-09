@@ -596,7 +596,8 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
     const key = api.kv.get<string>(`${KV_PREFIX}.balance.${provider.id}.key`, "")
       || findOpencodeKey(api, provider)
     if (balanceUnsupported()) { setBalanceState({ status: "idle", data: null, lastFetch: 0, error: undefined, key: undefined }); return }
-    if (!key) { setBalanceState({ status: "idle", data: null, lastFetch: 0, error: undefined, key: undefined }); return }
+    // requiresKey === false：quota 来自外部登录态（如 qwencloud CLI），无 key 也照常查询
+    if (!key && provider.requiresKey !== false) { setBalanceState({ status: "idle", data: null, lastFetch: 0, error: undefined, key: undefined }); return }
     const now = Date.now()
     const prev = balanceState()
     // key 已更换（重新输入）→ 强制重新查询，绕过缓存
@@ -633,22 +634,30 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
   const balanceTimer = setInterval(pollBalance, BALANCE_POLL_MS)
   api.lifecycle.onDispose(() => clearInterval(balanceTimer))
 
-  /** 菜单中 provider 选项标题：标注 key 来源（手动配置 / OpenCode 自动复用 / 未配置）。 */
+  /** 菜单中 provider 选项标题：标注 key 来源（手动配置 / OpenCode 自动复用 / 外部 CLI / 未配置）。 */
   const providerOptionTitle = (p: BalanceProvider, current?: string) => {
     const t = createT(() => langCode())
     const hasManual = !!api.kv.get<string>(`${KV_PREFIX}.balance.${p.id}.key`, "")
-    const hasAuto = !hasManual && !!findOpencodeKey(api, p)
+    const hasAuto = !hasManual && p.requiresKey !== false && !!findOpencodeKey(api, p)
     const mark = hasManual
       ? t("keyUser")
-      : hasAuto
-        ? t("keyOpenCode")
-        : t("keyNotSet")
+      : p.requiresKey === false
+        ? t("keyCli")
+        : hasAuto
+          ? t("keyOpenCode")
+          : t("keyNotSet")
     return p.name + mark + (current && p.id === current ? " *" : "")
   }
 
   /** 弹出指定 provider 的 API Key 输入框（脱敏预填；空清除 / 含 * 保留原 key / 新 key 实时刷新）。 */
   const promptBalanceKey = (dialog: TuiDialogStack | undefined, provider: BalanceProvider) => {
     const t = createT(() => langCode())
+    // requiresKey === false：登录态在外部 CLI，粘贴 key 无用，直接给操作提示
+    if (provider.requiresKey === false) {
+      api.ui.toast({ message: t("balCliHint", { p: provider.name }) })
+      dialog?.clear()
+      return
+    }
     const current = api.kv.get<string>(`${KV_PREFIX}.balance.${provider.id}.key`, "")
     const masked = maskKey(current)
     dialog?.replace(() => (

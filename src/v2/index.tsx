@@ -105,7 +105,8 @@ function PluginRoot(props: {
     }
     const set = props.signals.setBalanceState
     if (props.signals.balanceUnsupported()) { set({ status: "idle", data: null, lastFetch: 0, error: undefined, key: undefined }); return }
-    if (!key) { set({ status: "idle", data: null, lastFetch: 0, error: undefined, key: undefined }); return }
+    // requiresKey === false：quota 来自外部登录态（如 qwencloud CLI），无 key 也照常查询
+    if (!key && provider.requiresKey !== false) { set({ status: "idle", data: null, lastFetch: 0, error: undefined, key: undefined }); return }
     const now = Date.now()
     const prev = props.signals.balanceState()
     // key 已更换（重新输入）→ 强制重新查询，绕过缓存

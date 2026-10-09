@@ -146,7 +146,7 @@ The plugin supports slash commands and command palette (`Ctrl + P`) for runtime 
 | `/cache-section` | Toggle sections & border | Independently show/hide Detail, Model & Pricing, Token Distribution, Loaded Skills, Balance, Bottom Bar, or the panel border (Bottom Bar is off by default on opencode 1.x; turning it on requires a TUI restart) |
 | `/cache-config` | View current config | Displays currency, rate, and section visibility |
 | `/cache-lang` | Switch display language | Pick Chinese or English from the dialog — takes effect immediately, no restart needed |
-| `/cache-balance` | Balance query settings | Pick a balance provider (menu shows key source: user key / OpenCode / not set) / toggle auto-switch |
+| `/cache-balance` | Balance query settings | Pick a balance provider (menu shows key source: user key / OpenCode / qwencloud CLI / not set) / toggle auto-switch |
 | `/cache-balance-key` | Set balance API key | Two-step flow: pick a provider → enter the API key |
 
 <div align="center">
@@ -204,10 +204,13 @@ Supported balance providers:
 | SiliconFlow | `https://api.siliconflow.cn/v1/user/info` | CNY | `sk-` | ✅ Supported |
 | OpenRouter | `https://openrouter.ai/api/v1/credits` | USD | `sk-or-` | ✅ Supported |
 | Moonshot | `https://api.moonshot.cn/v1/users/me/balance` | CNY | `sk-` | ✅ Supported |
+| QwenCloud Token Plan | `qwencloud usage summary --format json` (official CLI subprocess) | Credits | CLI login (`qwencloud auth login`) | ✅ Supported |
 | Zhipu GLM | Pending (community-reversed endpoint, unofficial) | CNY | — | ⏳ Planned |
 | xAI | Pending (requires Management Key + Team ID) | USD | — | ⏳ Planned |
 
 > **Key source**: a key set manually via `/cache-balance-key` takes priority; otherwise the plugin reuses the credential OpenCode already authenticated (`/connect`-configured providers). Providers with neither cannot show a balance.
+>
+> **Key-free provider (QwenCloud Token Plan)**: the Token Plan `sk-sp-*` key is inference-only — every billing route answers `ConsoleNeedLogin`, so quota cannot be queried with it. The plugin instead runs the official `@qwencloud/qwencloud-cli` (`usage summary`) and reuses its device-flow login to read the Credits quota (`remainingCredits / totalCredits`). Install it with `npm install -g @qwencloud/qwencloud-cli` and run `qwencloud auth login` once. Missing CLI shows "qwencloud CLI not installed"; a stale session shows "Run `qwencloud auth login` first". The menu marks this provider as "(qwencloud CLI)" and `/cache-balance-key` is a no-op for it.
 >
 > **Key storage**: manually configured API keys are stored in plaintext in the plugin's persistent KV — avoid using on shared devices.
 >
