@@ -1,7 +1,7 @@
 import type { Context, KeymapCommand } from "./types"
 import type { PanelApi, PanelSignals } from "../panel/panel-api"
 import { CURRENCIES, DEFAULT_RATES, visualPadEnd } from "../core"
-import { balanceCredentialKey, balanceProviders, getBalanceProvider, maskKey, type BalanceProvider } from "../balance-providers"
+import { balanceCredentialKey, balanceProviders, getBalanceProvider, maskKey, type BalanceMessageKey, type BalanceProvider } from "../balance-providers"
 import { LANG_META, createT, type LangCode } from "../i18n"
 import { resolveCredentialToken } from "./credentials"
 
@@ -89,7 +89,17 @@ export function makeCommands(context: Context, api: PanelApi, signals: PanelSign
     if (val === undefined) return // 取消
     const input = val.trim()
     let key: string
-    if (input === "") {
+    let savedMessage: { messageKey: BalanceMessageKey; params?: Record<string, string | number> } | undefined
+    if (provider.checkCredential && input !== "" && input !== current) {
+      // Cookie 类凭据：先解析再保存（Cookie 值里可能含 `*`，故不走脱敏回写分支）
+      const check = provider.checkCredential(input)
+      if (check.error) {
+        context.ui.toast.show({ message: t()(check.error.messageKey, check.error.params) })
+        return
+      }
+      key = check.value ?? input
+      savedMessage = check.saved
+    } else if (input === "") {
       key = ""
     } else if (input.includes("*")) {
       key = current
@@ -98,7 +108,8 @@ export function makeCommands(context: Context, api: PanelApi, signals: PanelSign
     }
     await api.kv.set(slot, key)
     signals.setBalanceRefresh(signals.balanceRefresh() + 1)
-    context.ui.toast.show({ message: key ? t()("keySaved") : t()("keyCleared") })
+    if (key && savedMessage) context.ui.toast.show({ message: t()(savedMessage.messageKey, savedMessage.params) })
+    else context.ui.toast.show({ message: key ? t()("keySaved") : t()("keyCleared") })
   }
 
   return [

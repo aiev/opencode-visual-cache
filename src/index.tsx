@@ -22,7 +22,7 @@ import type {
 } from "@opencode-ai/sdk/v2"
 import { createMemo, createSignal, createEffect, onMount, onCleanup, Show, For, untrack } from "solid-js"
 import { PLUGIN_VERSION } from "./_version"
-import { balanceCredentialKey, balanceProviders, getBalanceProvider, maskKey, matchBalanceProvider, type BalanceEntry, type BalanceProvider } from "./balance-providers"
+import { balanceCredentialKey, balanceProviders, getBalanceProvider, maskKey, matchBalanceProvider, type BalanceEntry, type BalanceMessageKey, type BalanceProvider } from "./balance-providers"
 import { LANG_META, createT, detectLang, type LangCode } from "./i18n"
 import {
   MAX_SAT, FALLBACK, CURRENCIES, DEFAULT_RATES,
@@ -670,11 +670,22 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
 ${t("balCookieHelp")}`
           : t("balKeyPrompt", { p: provider.name })}</text>}
         placeholder={provider.keyPlaceholder ?? "sk-..."}
-        value={masked}
+        value={provider.checkCredential ? "" : masked}
         onConfirm={(val) => {
           const input = val.trim()
           let key: string
-          if (input === "") {
+          let savedMessage: { messageKey: BalanceMessageKey; params?: Record<string, string | number> } | undefined
+          if (provider.checkCredential && input !== "" && input !== current) {
+            // Cookie 类凭据：先解析再保存（Cookie 值里可能含 `*`，故不走脱敏回写分支）
+            const check = provider.checkCredential(input)
+            if (check.error) {
+              api.ui.toast({ message: t(check.error.messageKey, check.error.params) })
+              dialog?.clear()
+              return
+            }
+            key = check.value ?? input
+            savedMessage = check.saved
+          } else if (input === "") {
             key = ""
           } else if (input.includes("*")) {
             key = current
@@ -683,7 +694,9 @@ ${t("balCookieHelp")}`
           }
           api.kv.set(slot, key)
           setBalanceRefresh(v => v + 1)
-          if (key) {
+          if (key && savedMessage) {
+            api.ui.toast({ message: t(savedMessage.messageKey, savedMessage.params) })
+          } else if (key) {
             api.ui.toast({ message: t("keySaved") })
           } else {
             api.ui.toast({ message: t("keyCleared") })

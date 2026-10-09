@@ -28,7 +28,15 @@ export interface BalanceDetail {
 export class BalanceError extends Error {}
 
 /** provider 文案可引用的 i18n key 子集（键定义见 src/i18n.ts）。 */
-export type BalanceMessageKey = "keyUser" | "keyOpenCode" | "keyNotSet" | "keyCli" | "keyCookie" | "balKeyPrompt" | "balCliHint" | "balCookiePrompt" | "balCookieHelp"
+export type BalanceMessageKey = "keyUser" | "keyOpenCode" | "keyNotSet" | "keyCli" | "keyCookie" | "balKeyPrompt" | "balCliHint" | "balCookiePrompt" | "balCookieHelp" | "balCookieOk" | "balCookieNoTicket" | "balCookieInvalid"
+
+/** 凭据输入校验结果：错误提示 / 成功提示 / 归一化后要写入 KV 的值。 */
+export interface BalanceCredentialCheck {
+  error?: { messageKey: BalanceMessageKey; params?: Record<string, string | number> }
+  saved?: { messageKey: BalanceMessageKey; params?: Record<string, string | number> }
+  /** 归一化后的凭据（省略表示按原输入保存）。 */
+  value?: string
+}
 
 /** 可插拔的余额 provider 适配器。 */
 export interface BalanceProvider {
@@ -46,6 +54,8 @@ export interface BalanceProvider {
   optionalKeyPrompt?: BalanceMessageKey
   /** 已配置凭据时菜单标注的 i18n key（默认 "keyUser"）。 */
   keySourceLabel?: BalanceMessageKey
+  /** 可选：保存前校验/归一化用户粘贴的凭据（Cookie 类凭据用，见 qwencloud）。 */
+  checkCredential?(input: string): BalanceCredentialCheck
   fetchBalance(apiKey: string, signal?: AbortSignal): Promise<BalanceEntry[]>
 }
 
@@ -564,15 +574,74 @@ const QWEN_WINDOW_SECONDS: Record<string, number> = {
   "1Month": 30 * 86400,
 }
 
-/** 归一化浏览器 Cookie：容忍 DevTools 复制带来的 `cookie:` 前缀、换行与空白。 */
-export function normalizeQwenCookie(value: string): string {
-  return value.split(/[\r\n]+/).map((line) => line.trim()).filter(Boolean).join("; ")
-    .replace(/^cookie:\s*/i, "").trim()
+/** 个人版 Token Plan 的会话票据（缺失时控制台网关会返回登录页）。 */
+const QWEN_SESSION_COOKIE = "login_qwencloud_ticket"
+
+/** 从任意粘贴形态里抽取 `name=value` 对：DevTools 请求头整行、`document.cookie`、
+ *  Application/Cookies 表格的逐行粘贴都能解析；无 `=` 的行（其它请求头、表头）自动丢弃。 */
+export function parseQwenCookiePairs(value: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  const put = (name: string, raw: string) => {
+    const key = name.trim().replace(/^cookie:\s*/i, "").replace(/^"|"$/g, "").replace(/:$/, "").trim()
+    const val = raw.trim().replace(/^"|"$/g, "")
+    if (!key || !val || !/^[A-Za-z0-9_.%-]+$/.test(key)) return
+    if (!out[key]) out[key] = val
+  }
+  const fromList = (list: unknown[]) => {
+    for (const item of list) {
+      if (item && typeof item === "object") {
+        const rec = item as Record<string, unknown>
+        if (typeof rec.name === "string" && typeof rec.value === "string") put(rec.name, rec.value)
+      }
+    }
+  }
+  // Cookie 导出（JSON 数组 / {cookies:[…]}）：整体解析后取 name/value
+  const trimmed = value.trim()
+  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    try {
+      const json: unknown = JSON.parse(trimmed)
+      const list = Array.isArray(json) ? json : ((json as { cookies?: unknown }).cookies ?? [])
+      if (Array.isArray(list)) fromList(list)
+      return out
+    } catch {
+      // 不是合法 JSON → 落到逐行解析
+    }
+  }
+  for (const chunk of value.split(/[\r\n;]+/)) {
+    const line = chunk.trim()
+    if (!line) continue
+    // Netscape cookies.txt / DevTools 表格粘贴：制表符分隔，倒数两列为 name、value
+    if (line.includes("\t")) {
+      const cols = line.split("\t").filter((c) => c.trim() !== "")
+      if (cols.length >= 2) put(cols[cols.length - 2]!, cols[cols.length - 1]!)
+      continue
+    }
+    const eq = line.indexOf("=")
+    if (eq <= 0) {
+      // `"name": "value"`（DevTools/JSON 导出）：只有带引号的键才当 Cookie，避免误收其它请求头
+      const quoted = /^"([A-Za-z0-9_.%-]+)"\s*:\s*"(.+)"$/.exec(line)
+      if (quoted) put(quoted[1]!, quoted[2]!)
+      continue
+    }
+    put(line.slice(0, eq), line.slice(eq + 1))
+  }
+  return out
 }
 
-/** 粗略判断凭据像不像 Cookie（`name=value; …`），避免把误粘贴的 API key 发出去。 */
+/** 归一化浏览器 Cookie：只保留识别到的 `name=value` 对，去重后以 `; ` 连接。 */
+export function normalizeQwenCookie(value: string): string {
+  return Object.entries(parseQwenCookiePairs(value)).map(([k, v]) => `${k}=${v}`).join("; ")
+}
+
+/** 粗略判断凭据像不像 Cookie，避免把误粘贴的 API key 发出去。 */
 export function looksLikeQwenCookie(value: string): boolean {
-  return !/^sk-/i.test(value) && /^[A-Za-z0-9_.-]+=[^;=]/.test(value)
+  if (/^sk-/i.test(value.trim())) return false
+  return Object.keys(parseQwenCookiePairs(value)).length > 0
+}
+
+/** 粘贴的 Cookie 里是否含会话票据（决定 quota 能否真的读到）。 */
+export function qwenCookieHasTicket(value: string): boolean {
+  return Object.prototype.hasOwnProperty.call(parseQwenCookiePairs(value), QWEN_SESSION_COOKIE)
 }
 
 function qwenConsoleHeaders(cookie: string): Record<string, string> {
@@ -774,20 +843,35 @@ const qwencloudProvider: BalanceProvider = {
   credentialSlot: "cookie",
   optionalKeyPrompt: "balCookiePrompt",
   keySourceLabel: "keyCookie",
+  // 保存前把粘贴内容拆成 name=value 对，并告诉用户有没有找到会话票据
+  checkCredential(input) {
+    const pairs = parseQwenCookiePairs(input)
+    const count = Object.keys(pairs).length
+    if (count === 0) return { error: { messageKey: "balCookieInvalid" } }
+    const found = Object.prototype.hasOwnProperty.call(pairs, QWEN_SESSION_COOKIE)
+    return {
+      value: normalizeQwenCookie(input),
+      saved: { messageKey: found ? "balCookieOk" : "balCookieNoTicket", params: { n: count } },
+    }
+  },
   keyPlaceholder: "login_qwencloud_ticket=...",
   aliases: ["alibaba-token-plan", "bailian-token-plan"],
   async fetchBalance(credential, signal) {
     const cookie = normalizeQwenCookie(credential ?? "")
     // 没有可用 Cookie（或误粘贴了 API key）→ 回退官方 CLI 的 device-flow 登录态
-    if (looksLikeQwenCookie(cookie)) return fetchQwenConsoleQuota(cookie, signal)
-    const stdout = await runQwenCli(["usage", "summary", "--format", "json"], signal)
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(stdout)
-    } catch {
-      throw new BalanceError("EMPTY")
+    if (!cookie || /^sk-/i.test((credential ?? "").trim())) {
+      const stdout = await runQwenCli(["usage", "summary", "--format", "json"], signal)
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(stdout)
+      } catch {
+        throw new BalanceError("EMPTY")
+      }
+      return parseQwenTokenPlanUsage(parsed)
     }
-    return parseQwenTokenPlanUsage(parsed)
+    // 粘贴了一堆 Cookie 却没有登录票据：不去打三个接口，直接报明确的错误
+    if (!qwenCookieHasTicket(cookie)) throw new BalanceError("NO_TICKET")
+    return fetchQwenConsoleQuota(cookie, signal)
   },
 }
 

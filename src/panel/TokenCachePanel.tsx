@@ -817,6 +817,7 @@ export function TokenCachePanel(props: {
                     if (code === "AUTH") return t("balErrAuth")
                     if (code === "NOPLAN") return t("balErrNoPlan")
                     if (code === "COOKIE") return t("balErrCookie")
+                    if (code === "NO_TICKET") return t("balErrNoTicket")
                     return t("balError") + (code ? ` (${code})` : "")
                   })()}</span>
                 </text>

@@ -5,8 +5,10 @@ import {
   looksLikeQwenCookie,
   matchBalanceProvider,
   normalizeQwenCookie,
+  parseQwenCookiePairs,
   parseQwenConsoleQuota,
   parseQwenTokenPlanUsage,
+  qwenCookieHasTicket,
   type BalanceDetail,
 } from "../src/balance-providers"
 
@@ -102,6 +104,54 @@ assert.equal(normalizeQwenCookie("  login_qwencloud_ticket=xyz  "), "login_qwenc
 assert.equal(looksLikeQwenCookie("a=1; b=2"), true)
 assert.equal(looksLikeQwenCookie("sk-ws-abcdef"), false)
 assert.equal(looksLikeQwenCookie(""), false)
+
+// ── 粘贴整段请求头 / cookies.txt / JSON 导出时，只保留 name=value 对 ──
+const pastedHeaders = [
+  "POST /data/api.json HTTP/1.1",
+  "Host: home.qwencloud.com",
+  "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/147.0.0.0 Safari/537.36",
+  "cookie: cna=abc; login_qwencloud_ticket=tick=et==; tfstk=x1",
+  "Accept: application/json",
+].join("\n")
+assert.deepEqual(Object.keys(parseQwenCookiePairs(pastedHeaders)), ["cna", "login_qwencloud_ticket", "tfstk"])
+assert.equal(parseQwenCookiePairs(pastedHeaders)["login_qwencloud_ticket"], "tick=et==")
+assert.equal(qwenCookieHasTicket(pastedHeaders), true)
+assert.equal(normalizeQwenCookie(pastedHeaders), "cna=abc; login_qwencloud_ticket=tick=et==; tfstk=x1")
+
+// 同名重复：首个生效（与浏览器发送顺序一致）
+assert.equal(parseQwenCookiePairs("a=1; a=2")["a"], "1")
+
+// cookies.txt（制表符分隔，含 #HttpOnly_ 前缀）
+assert.equal(
+  parseQwenCookiePairs("#HttpOnly_.qwencloud.com\tTRUE\t/\tFALSE\t1799999999\tlogin_qwencloud_ticket\tabc123")["login_qwencloud_ticket"],
+  "abc123",
+)
+assert.equal(qwenCookieHasTicket("#HttpOnly_.qwencloud.com\tTRUE\t/\tFALSE\t1799999999\tlogin_qwencloud_ticket\tabc123"), true)
+
+// JSON / `"name": "value"` 导出
+assert.deepEqual(Object.keys(parseQwenCookiePairs('[{"name":"cna","value":"v1"}]')), ["cna"])
+assert.equal(parseQwenCookiePairs('"login_qwencloud_ticket": "tok"')["login_qwencloud_ticket"], "tok")
+
+// checkCredential：给出「识别到几个 / 有没有票据」的反馈
+const okCheck = qwen.checkCredential!("cna=abc; login_qwencloud_ticket=tok")
+assert.equal(okCheck.error, undefined)
+assert.equal(okCheck.saved?.messageKey, "balCookieOk")
+assert.equal(okCheck.saved?.params?.n, 2)
+assert.equal(okCheck.value, "cna=abc; login_qwencloud_ticket=tok")
+
+const noTicket = qwen.checkCredential!("cna=abc; tfstk=x1")
+assert.equal(noTicket.error, undefined)
+assert.equal(noTicket.saved?.messageKey, "balCookieNoTicket")
+assert.equal(noTicket.saved?.params?.n, 2)
+
+for (const junk of ["", "sk-ws-abcdef", "totally not a cookie", "Host: home.qwencloud.com"]) {
+  const check = qwen.checkCredential!(junk)
+  assert.equal(check.error?.messageKey, "balCookieInvalid", junk)
+  assert.equal(check.value, undefined, junk)
+}
+
+// 存了 Cookie 但没有票据 → 明确报错，而不是静默回退 CLI
+await assert.rejects(qwen.fetchBalance("cna=abc; tfstk=x1"), /NO_TICKET/)
 
 // ── 控制台网关（个人版 Token Plan 真实响应形状，2026-10-09 抓取）──
 const consoleQuota = {
