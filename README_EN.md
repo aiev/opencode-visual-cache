@@ -196,6 +196,10 @@ Toggled via `/cache-section` — takes effect instantly with no restart (the **B
 
 The panel can display account balance from multiple AI providers. With **auto-switch** enabled, the balance query follows the model provider of the current session automatically.
 
+On OpenCode V2, every session tab owns its balance selection and cached result. Switching tabs immediately shows that tab's provider; switching models uses the session's selected provider rather than its last assistant response. For example, `alibaba-token-plan/deepseek-v4-flash` queries the Alibaba Token Plan, not the official DeepSeek account. Queries run even with the sidebar hidden, and pending results from another tab/provider are cancelled and ignored. Unknown providers never fall back to DeepSeek.
+
+Manual selections and the auto-switch toggle apply only to the tab where `/cache-balance` or `/cache-balance-key` was opened, even if you switch tabs while its dialog is open. V2 saves these preferences under `cache_panel.balance.session.<sessionID>`; legacy global provider/auto preferences are not carried over. Credentials remain provider-scoped and existing keys/cookies are preserved.
+
 Supported balance providers:
 
 | Provider | Balance endpoint | Currency | Key prefix | Status |

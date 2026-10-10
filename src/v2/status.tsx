@@ -13,7 +13,7 @@ const KV_PREFIX = "cache_panel"
 /**
  * 底部状态栏（prompt.footer.status）——对齐 V1 BottomStatusBar 统计段口径：
  * 单条命中率（最后一条有 token 的 assistant 消息）+ 趋势 + Tokens 总量 + 余额。
- * 余额读共享 signals.balanceState（PluginRoot 驱动轮询）；provider 不支持余额时隐藏余额段（对齐 V1）。
+ * Sidebar and footer read the same session-bound balance state; the app owner drives polling.
  * 颜色经 mapTheme（V1 形状）——与侧边栏命中率颜色同源，保证两处一致。
  * 显隐受 signals.sectionBottom 控制（/cache-section 切换），启动时从 kv 恢复偏好（对齐 V1）。
  */

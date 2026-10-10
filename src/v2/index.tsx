@@ -1,15 +1,15 @@
 /** @jsxImportSource @opentui/solid */
 
-import { createSignal, createEffect, onMount, onCleanup, untrack } from "solid-js"
+import { createSignal, createMemo, createEffect, onMount, onCleanup, untrack } from "solid-js"
 import type { Context, PluginModule } from "./types"
-import { createPanelApi } from "./v2-panel-api"
+import { createPanelApi, selectedSessionProviderID } from "./v2-panel-api"
 import { TokenCachePanel } from "../panel/TokenCachePanel"
-import type { BalanceState, PanelApi, PanelSignals } from "../panel/panel-api"
+import type { PanelApi, PanelSignals } from "../panel/panel-api"
 import { StatusView } from "./status"
 import { mapTheme } from "./theme"
-import { makeCommands, findOpencodeKeyV2 } from "./commands"
+import { makeCommands, findOpencodeKeyV2, currentSessionID } from "./commands"
 import { credentialsDbReady } from "./credentials"
-import { balanceCredentialKey, getBalanceProvider } from "../balance-providers"
+import { createSessionBalances, type SessionBalances } from "./session-balance"
 import { LANG_META, detectLang, type LangCode } from "../i18n"
 
 const KV_PREFIX = "cache_panel"
@@ -22,9 +22,8 @@ const INIT_LANG: LangCode = DEBUG_LANG !== undefined && LANG_META.some((m) => m.
   ? (DEBUG_LANG as LangCode)
   : detectLang()
 
-/** V2 侧创建面板信号（实验：默认值；偏好持久化经 PanelApi.kv → storage.store）。
- *  返回 PanelSignals + setBalanceState：余额轮询由 PluginRoot 驱动（V1 同构）。 */
-function createPanelSignals(): PanelSignals & { setBalanceState: (v: BalanceState) => void } {
+/** Presentation preferences are shared; balance accessors are bound to one session. */
+function createPanelSignals(balances: SessionBalances): PanelSignals {
   const [currencySymbol, setCurrencySymbol] = createSignal("$")
   const [exchangeRate, setExchangeRate] = createSignal(1)
   const [langCode, setLangCode] = createSignal(INIT_LANG)
@@ -34,16 +33,11 @@ function createPanelSignals(): PanelSignals & { setBalanceState: (v: BalanceStat
   const [sectionSkills, setSectionSkills] = createSignal(true)
   const [sectionBalance, setSectionBalance] = createSignal(true)
   const [sectionBottom, setSectionBottom] = createSignal(true)
-  const [balanceRefresh, setBalanceRefresh] = createSignal(0)
-  const [balanceProviderId, setBalanceProviderId] = createSignal("")
-  const [autoBalance, setAutoBalance] = createSignal(true)
-  const [balanceUnsupported, setBalanceUnsupported] = createSignal(false)
-  const [balanceState, setBalanceState] = createSignal<BalanceState>({ status: "idle", data: null, lastFetch: 0 })
   const [balanceCurrency, setBalanceCurrency] = createSignal("")
   const [borderVisible, setBorderVisible] = createSignal(true)
   const [overrideSessionId, setOverrideSessionId] = createSignal<string | undefined>(undefined)
   const [sidebarVisible, setSidebarVisible] = createSignal(true)
-  return {
+  const shared = {
     currencySymbol, setCurrencySymbol,
     exchangeRate, setExchangeRate,
     langCode: langCode as PanelSignals["langCode"], setLangCode: setLangCode as PanelSignals["setLangCode"],
@@ -53,92 +47,50 @@ function createPanelSignals(): PanelSignals & { setBalanceState: (v: BalanceStat
     sectionSkills, setSectionSkills,
     sectionBalance, setSectionBalance,
     sectionBottom, setSectionBottom,
-    balanceRefresh, setBalanceRefresh,
-    balanceProviderId, setBalanceProviderId,
-    autoBalance, setAutoBalance,
-    balanceUnsupported, setBalanceUnsupported,
-    balanceState,
-    setBalanceState,
     balanceCurrency, setBalanceCurrency,
     borderVisible, setBorderVisible,
     overrideSessionId, setOverrideSessionId,
     sidebarVisible, setSidebarVisible,
   }
+  const bind = (sessionID: () => string): PanelSignals => ({
+    ...shared,
+    ...balances.signals(sessionID),
+    balanceManaged: true,
+    balanceForSession: (id) => bind(typeof id === "function" ? id : () => id),
+  })
+  return bind(balances.activeSessionID)
 }
 
-/** 命令根组件：挂在始终存在的 app slot，避免侧栏隐藏时命令层未挂载。 */
-function CommandRoot(props: { context: Context; api: PanelApi; signals: PanelSignals }) {
+/** One always-mounted owner for commands and balance queries, including when the sidebar is hidden. */
+function CommandRoot(props: { context: Context; api: PanelApi; signals: PanelSignals; balances: SessionBalances }) {
   props.context.keymap.layer(() => ({
     mode: "global",
     commands: makeCommands(props.context, props.api, props.signals),
   }))
+  onMount(() => {
+    const saved = props.api.kv.get<string>(`${KV_PREFIX}.lang`)
+    if (saved && LANG_META.some((m) => m.code === saved)) props.signals.setLangCode(saved as LangCode)
+  })
+  const target = createMemo(() => props.balances.watchKey())
+  createEffect(() => {
+    void target()
+    untrack(() => { void props.balances.poll() })
+  })
+  const timer = setInterval(() => { void props.balances.poll() }, BALANCE_POLL_MS)
+  onCleanup(() => {
+    clearInterval(timer)
+    props.balances.dispose()
+  })
   return null
 }
 
-/** 面板根组件：渲染共享 TokenCachePanel；同时驱动余额轮询（对齐 V1 tui() 的 pollBalance）。 */
+/** Presentation only: mounting/unmounting a sidebar cannot change the balance query owner. */
 function PluginRoot(props: {
   context: Context
   api: PanelApi
-  signals: PanelSignals & { setBalanceState: (v: BalanceState) => void }
+  signals: PanelSignals
   sessionID: string
 }) {
-  // 请求序号：防止定时轮询与手动刷新并发时，慢的旧请求覆盖新结果（对齐 V1）
-  let balanceSeq = 0
-  // 语言偏好恢复（对齐 V1 tui() restoreLang：优先用户 /cache-lang 设置，覆盖自动检测）
-  onMount(() => {
-    try {
-      const saved = props.api.kv.get<string>(`${KV_PREFIX}.lang`)
-      if (saved && LANG_META.some((m) => m.code === saved)) {
-        props.signals.setLangCode(saved as LangCode)
-      }
-    } catch {}
-  })
-
-  // ── 余额轮询（对齐 V1 tui() pollBalance）：手动 key 优先，缺失时自动复用 OpenCode 已认证 key ──
-  const pollBalance = async () => {
-    const provider = getBalanceProvider(props.signals.balanceProviderId())
-    let key = props.api.kv.get<string>(balanceCredentialKey(KV_PREFIX, provider), "") ?? ""
-    if (!key && provider.requiresKey !== false) {
-      // V2 凭据保存在宿主 SQLite：等库就绪再解析，避免首轮回退到过期的 auth.json
-      await credentialsDbReady()
-      key = findOpencodeKeyV2(props.context, provider)
-    }
-    const set = props.signals.setBalanceState
-    if (props.signals.balanceUnsupported()) { set({ status: "idle", data: null, lastFetch: 0, error: undefined, key: undefined }); return }
-    // requiresKey === false：quota 来自外部登录态（如 qwencloud CLI），无 key 也照常查询
-    if (!key && provider.requiresKey !== false) { set({ status: "idle", data: null, lastFetch: 0, error: undefined, key: undefined }); return }
-    const now = Date.now()
-    const prev = props.signals.balanceState()
-    // key 已更换（重新输入）→ 强制重新查询，绕过缓存
-    if (prev.status === "ok" && prev.key === key && now - prev.lastFetch < BALANCE_POLL_MS) return
-    const seq = ++balanceSeq
-    set({ ...prev, status: "loading", error: undefined, key })
-    const controller = new AbortController()
-    let timedOut = false
-    const timer = setTimeout(() => { timedOut = true; controller.abort() }, 10_000)
-    try {
-      const data = await provider.fetchBalance(key, controller.signal)
-      clearTimeout(timer)
-      if (seq !== balanceSeq) return // 已被更新的请求取代，丢弃过期结果
-      set({ status: "ok", data, lastFetch: Date.now(), error: undefined, key })
-    } catch (err) {
-      clearTimeout(timer)
-      if (seq !== balanceSeq) return
-      const code = timedOut ? "TIMEOUT" : (err instanceof Error ? err.message : "")
-      set({ status: "error", data: null, lastFetch: 0, error: code, key })
-    }
-  }
-  // Re-fetch when the API key is (re)configured via /cache-balance-key。
-  // 注意：pollBalance 内部读写 balanceState 信号，若不做 untrack 包裹，
-  // effect 会追踪 balanceState 的变化并与 setBalanceState 形成无限循环。
-  createEffect(() => {
-    void props.signals.balanceRefresh()
-    untrack(() => { void pollBalance() })
-  })
-  // 定时轮询（5 分钟）；随插件生命周期清理
-  const balanceTimer = setInterval(pollBalance, BALANCE_POLL_MS)
-  onCleanup(() => clearInterval(balanceTimer))
-
   // auto-clear override：用户导航到不同主会话时清除子代理视图（对齐 V1 createSidebarSlot）
   let lastSlotSid = props.sessionID
   createEffect(() => {
@@ -157,7 +109,7 @@ function PluginRoot(props: {
       theme={mapTheme(props.context.theme)}
       api={props.api}
       sessionId={props.sessionID}
-      signals={props.signals}
+      signals={props.signals.balanceForSession!(() => props.sessionID)}
     />
   )
 }
@@ -166,7 +118,16 @@ const mod: PluginModule & { server: () => Promise<Record<string, never>> } = {
   id: "opencode-visual-cache",
   setup(context: Context) {
     const api = createPanelApi(context)
-    const signals = createPanelSignals()
+    const balances = createSessionBalances({
+      activeSessionID: () => currentSessionID(context),
+      providerID: (sessionID) => selectedSessionProviderID(context, sessionID),
+      kv: api.kv,
+      resolveKey: async (provider, sourceProviderID) => {
+        await credentialsDbReady()
+        return findOpencodeKeyV2(context, provider, sourceProviderID)
+      },
+    })
+    const signals = createPanelSignals(balances)
 
     // 侧边栏完整面板（与 V1 同一组件；命令 layer 在组件内注册）。
     // prepend：排在宿主官方信息（问候/Context/用量）之前，紧跟会话标题。
@@ -180,19 +141,25 @@ const mod: PluginModule & { server: () => Promise<Record<string, never>> } = {
     // 命令层不能依赖侧栏挂载；窄屏或隐藏侧栏时仍需可用。
     context.ui.slot({
       append: "app",
-      render: () => <CommandRoot context={context} api={api} signals={signals} />,
+      render: () => <CommandRoot context={context} api={api} signals={signals} balances={balances} />,
     })
 
-    // 底部状态栏（完整口径与 V1 一致；余额读共享 signals.balanceState）
+    // Sidebar and footer bind to the same session-owned balance snapshot.
     context.ui.slot({
       append: "prompt.footer.status",
       render: (props) => (
-        <StatusView context={context} api={api} signals={signals} sessionID={String(props.sessionID ?? "")} />
+        <StatusView
+          context={context}
+          api={api}
+          signals={signals.balanceForSession!(() => String(props.sessionID ?? currentSessionID(context)))}
+          sessionID={String(props.sessionID ?? currentSessionID(context))}
+        />
       ),
     })
 
     // 偏好持久化（实验：storage.store 用法验证）
     context.storage.store("opencode-visual-cache.panel", { initial: { collapsed: false } })
+    return balances.dispose
   },
   // V1 server 空实现（兼容标记）：参考 oh-my-opencode-slim 的 { id, server, setup }——
   // v2 加载 setup，但 V1 检测需要 server 字段识别为插件

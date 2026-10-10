@@ -1,7 +1,7 @@
 import type { Context, KeymapCommand } from "./types"
 import type { PanelApi, PanelSignals } from "../panel/panel-api"
 import { CURRENCIES, DEFAULT_RATES, visualPadEnd } from "../core"
-import { balanceCredentialKey, balanceProviders, getBalanceProvider, maskKey, type BalanceMessageKey, type BalanceProvider } from "../balance-providers"
+import { balanceCredentialKey, balanceProviders, getBalanceProvider, matchBalanceProvider, maskKey, type BalanceMessageKey, type BalanceProvider } from "../balance-providers"
 import { LANG_META, createT, type LangCode } from "../i18n"
 import { resolveCredentialToken } from "./credentials"
 
@@ -21,12 +21,13 @@ function extractToolParts(msg: Record<string, any>): Array<Record<string, any>> 
  *  否则解析宿主已认证凭据——V2 的 Provider.Info 不含 key 字段，且凭据保存在
  *  宿主 SQLite（credential 表），auth.json 仅作迁移遗留兜底（见 credentials.ts）。
  *  导出供 index.tsx 的余额轮询复用。 */
-export function findOpencodeKeyV2(context: Context, provider: BalanceProvider): string {
+export function findOpencodeKeyV2(context: Context, provider: BalanceProvider, sourceProviderID?: string): string {
+  const scopedID = sourceProviderID && matchBalanceProvider(sourceProviderID)?.id === provider.id ? sourceProviderID : undefined
+  const id = (scopedID ?? provider.id).toLowerCase()
   try {
-    const provs = context.data.location.provider.list() as Array<{ id?: string; key?: string; options?: { apiKey?: string } }>
-    const id = provider.id.toLowerCase()
+    const provs = context.data.location.provider.list(context.location) as Array<{ id?: string; key?: string; options?: { apiKey?: string } }>
     const hit = provs.find((p) => String(p.id ?? "").toLowerCase() === id)
-      ?? provs.find((p) => String(p.id ?? "").toLowerCase().startsWith(id))
+      ?? (!scopedID ? provs.find((p) => String(p.id ?? "").toLowerCase().startsWith(id)) : undefined)
     if (hit) {
       const k = typeof hit.key === "string" ? hit.key : ""
       if (k) return k
@@ -36,11 +37,11 @@ export function findOpencodeKeyV2(context: Context, provider: BalanceProvider): 
       if (hit.id) return resolveCredentialToken(hit.id)
     }
   } catch { /* fall through to stored credentials */ }
-  return resolveCredentialToken(provider.id)
+  return resolveCredentialToken(scopedID ?? provider.id)
 }
 
 /** 当前路由 sessionID（V2 ui.router.current()；Route = { type: "session", sessionID }）。 */
-function currentSessionID(context: Context): string {
+export function currentSessionID(context: Context): string {
   try {
     const rt = context.ui.router.current()
     if (rt?.type === "session" && rt.sessionID) return String(rt.sessionID)
@@ -69,7 +70,7 @@ export function makeCommands(context: Context, api: PanelApi, signals: PanelSign
   }
 
   /** 弹出指定 provider 的凭据输入框（空清除 / 含 * 保留原值 / 新值实时刷新）。 */
-  const promptBalanceKey = async (provider: BalanceProvider): Promise<void> => {
+  const promptBalanceKey = async (provider: BalanceProvider, tab: PanelSignals): Promise<void> => {
     // requiresKey === false：登录态在外部 CLI，粘贴 key 无用，直接给操作提示；
     // 配置了 optionalKeyPrompt 的 provider（如 qwencloud）仍接受可选 Cookie 输入
     if (provider.requiresKey === false && !provider.optionalKeyPrompt) {
@@ -107,7 +108,7 @@ export function makeCommands(context: Context, api: PanelApi, signals: PanelSign
       key = input
     }
     await api.kv.set(slot, key)
-    signals.setBalanceRefresh(signals.balanceRefresh() + 1)
+    tab.setBalanceRefresh(tab.balanceRefresh() + 1)
     if (key && savedMessage) context.ui.toast.show({ message: t()(savedMessage.messageKey, savedMessage.params) })
     else context.ui.toast.show({ message: key ? t()("keySaved") : t()("keyCleared") })
   }
@@ -285,8 +286,9 @@ export function makeCommands(context: Context, api: PanelApi, signals: PanelSign
       palette: true,
       slash: { name: "cache-balance" },
       run: async () => {
-        const current = signals.balanceProviderId()
-        const auto = signals.autoBalance()
+        const tab = signals.balanceForSession?.(currentSessionID(context)) ?? signals
+        const current = tab.balanceProviderId()
+        const auto = tab.autoBalance()
         const autoLabel = `${t()("autoSwitchOpt")} [${auto ? "ON" : "OFF"}]`
         const opt = await context.ui.dialog.select<string>({
           title: t()("balProvTitle"),
@@ -301,23 +303,20 @@ export function makeCommands(context: Context, api: PanelApi, signals: PanelSign
         if (!opt) return
         if (opt === "__auto__") {
           const next = !auto
-          await api.kv.set(`${KV_PREFIX}.balance.auto`, next)
-          signals.setAutoBalance(next)
+          tab.setAutoBalance(next)
           context.ui.toast.show({ message: next ? t()("autoSwitchOn") : t()("autoSwitchOff") })
         } else {
           const provider = getBalanceProvider(opt)
           // 手动切换会关闭自动切换
-          await api.kv.set(`${KV_PREFIX}.balance.provider`, provider.id)
-          await api.kv.set(`${KV_PREFIX}.balance.auto`, false)
-          signals.setBalanceProviderId(provider.id)
-          signals.setAutoBalance(false)
-          signals.setBalanceUnsupported(false)
+          tab.setBalanceProviderId(provider.id)
+          tab.setAutoBalance(false)
+          tab.setBalanceUnsupported(false)
           // 切换后立即按新 provider 刷新显示（无 key 时显示 idle，避免残留上一 provider 余额）
-          signals.setBalanceRefresh(signals.balanceRefresh() + 1)
+          tab.setBalanceRefresh(tab.balanceRefresh() + 1)
           const hasKey = !!api.kv.get<string>(balanceCredentialKey(KV_PREFIX, provider), "")
           if (!hasKey && (provider.requiresKey !== false || provider.optionalKeyPrompt)) {
             // 未配置凭据 → 进入设置流程（对话框保持打开等待输入）
-            await promptBalanceKey(provider)
+            await promptBalanceKey(provider, tab)
           } else if (!hasKey) {
             // 免凭据 provider（登录态在外部 CLI）：只给操作提示
             context.ui.toast.show({ message: t()("balCliHint", { p: provider.name }) })
@@ -336,6 +335,7 @@ export function makeCommands(context: Context, api: PanelApi, signals: PanelSign
       palette: true,
       slash: { name: "cache-balance-key" },
       run: async () => {
+        const tab = signals.balanceForSession?.(currentSessionID(context)) ?? signals
         // 步骤 1：选择 provider
         const opt = await context.ui.dialog.select<string>({
           title: t()("balSelectTitle"),
@@ -347,14 +347,13 @@ export function makeCommands(context: Context, api: PanelApi, signals: PanelSign
         if (!opt) return
         const provider = getBalanceProvider(opt)
         // 手动指定 provider 会关闭自动切换
-        await api.kv.set(`${KV_PREFIX}.balance.provider`, provider.id)
-        await api.kv.set(`${KV_PREFIX}.balance.auto`, false)
-        signals.setBalanceProviderId(provider.id)
-        signals.setAutoBalance(false)
+        tab.setBalanceProviderId(provider.id)
+        tab.setAutoBalance(false)
+        tab.setBalanceUnsupported(false)
         // 切换后立即刷新显示（防止取消输入时残留上一 provider 的余额）
-        signals.setBalanceRefresh(signals.balanceRefresh() + 1)
+        tab.setBalanceRefresh(tab.balanceRefresh() + 1)
         // 步骤 2：输入 key
-        await promptBalanceKey(provider)
+        await promptBalanceKey(provider, tab)
       },
     },
     // ── /cache-debug-skills 技能检测调试 ──

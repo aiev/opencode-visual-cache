@@ -133,7 +133,7 @@ export function TokenCachePanel(props: {
   const [refreshTick, setRefreshTick] = createSignal(0)
 
   // 当前 provider 显示名（余额查询状态为共享信号，见 PanelSignals.balanceState）
-  const providerName = createMemo(() => getBalanceProvider(balanceProviderId()).name)
+  const providerName = createMemo(() => balanceProviders.find((p) => p.id === balanceProviderId())?.name ?? "")
 
   /** 余额明细列表：取带 details 的那条余额记录。 */
   const balanceDetails = createMemo(() => balanceState().data?.find((entry) => entry.details)?.details ?? [])
@@ -142,6 +142,7 @@ export function TokenCachePanel(props: {
   // 直接追踪 messages 取最后一条 assistant 消息的 providerID——
   // 不依赖 session.model 的响应式更新（模型切换时该链路可能不触发重算）。
   createEffect(() => {
+    if (props.signals.balanceManaged) return
     if (!autoBalance()) return
     const sid = props.signals.overrideSessionId() ?? props.sessionId
     const msgs = props.api.state.session.messages(sid) as Message[]
@@ -404,14 +405,16 @@ export function TokenCachePanel(props: {
         const balCur = props.api.kv.get<string>(`${KV_PREFIX}.balance_currency`)
         if (typeof balCur === "string") setBalanceCurrency(balCur)
         // Restore balance provider (fall back to default when unknown)
-        const savedProvider = props.api.kv.get<string>(`${KV_PREFIX}.balance.provider`)
-        if (typeof savedProvider === "string" && balanceProviders.some((p) => p.id === savedProvider)) {
-          setBalanceProviderId(savedProvider)
-          setBalanceUnsupported(false)
+        if (!props.signals.balanceManaged) {
+          const savedProvider = props.api.kv.get<string>(`${KV_PREFIX}.balance.provider`)
+          if (typeof savedProvider === "string" && balanceProviders.some((p) => p.id === savedProvider)) {
+            setBalanceProviderId(savedProvider)
+            setBalanceUnsupported(false)
+          }
+          // V1 global preferences; V2 restores its preferences separately for each tab.
+          const savedAuto = props.api.kv.get<boolean>(`${KV_PREFIX}.balance.auto`)
+          if (typeof savedAuto === "boolean") setAutoBalance(savedAuto)
         }
-        // Restore auto-switch (default on)
-        const savedAuto = props.api.kv.get<boolean>(`${KV_PREFIX}.balance.auto`)
-        if (typeof savedAuto === "boolean") setAutoBalance(savedAuto)
         // Migrate legacy DeepSeek key (cache_panel.ds_key → cache_panel.balance.deepseek.key)
         const legacyKey = props.api.kv.get<string>(`${KV_PREFIX}.ds_key`, "")
         if (legacyKey) {
@@ -420,7 +423,7 @@ export function TokenCachePanel(props: {
           props.api.kv.set(`${KV_PREFIX}.ds_key`, "")
         }
         // 恢复的 provider 可能与默认值不同，强制重新查询
-        props.signals.setBalanceRefresh(props.signals.balanceRefresh() + 1)
+        if (!props.signals.balanceManaged) props.signals.setBalanceRefresh(props.signals.balanceRefresh() + 1)
         setSectionDetail(Boolean(props.api.kv.get(`${KV_PREFIX}.section.detail`, true)))
         setSectionModel(Boolean(props.api.kv.get(`${KV_PREFIX}.section.model`, true)))
         setSectionDist(Boolean(props.api.kv.get(`${KV_PREFIX}.section.dist`, true)))

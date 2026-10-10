@@ -44,7 +44,7 @@ export interface MessageInfo {
   readonly id: string
   readonly type: string
   readonly agent?: string
-  readonly model?: string
+  readonly model?: { readonly providerID: string; readonly id: string }
   readonly time: { readonly created: number; readonly completed?: number }
   readonly cost?: unknown
   readonly tokens?: TokenUsage
@@ -55,7 +55,7 @@ export interface SessionInfo {
   readonly id: string
   readonly title?: string
   readonly time?: { readonly created: number; readonly updated: number }
-  readonly model?: string
+  readonly model?: { readonly providerID: string; readonly id: string }
   readonly agent?: string
   readonly parentID?: string
 }
@@ -127,6 +127,9 @@ export interface Context {
   readonly data: Data
   readonly storage: Storage
   readonly ui: {
+    readonly model?: {
+      current(): { readonly providerID: string; readonly id: string } | undefined
+    }
     slot(claim: SlotClaim): () => void
     readonly toast: {
       show(options: { readonly message: string; readonly title?: string; readonly variant?: string }): void

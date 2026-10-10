@@ -1,6 +1,17 @@
 import type { Context } from "./types"
 import type { PanelApi, PanelSession } from "../panel/panel-api"
 
+/** Read this tab's selection; historical assistant messages cannot override a model switch. */
+export function selectedSessionProviderID(context: Context, sessionID: string): string {
+  if (!sessionID) return ""
+  const model = context.data.session.get(sessionID)?.model
+  if (model?.providerID) return model.providerID
+  const route = context.ui.router.current()
+  return route?.type === "session" && route.sessionID === sessionID
+    ? context.ui.model?.current()?.providerID ?? ""
+    : ""
+}
+
 /**
  * V2 (opencode2) context → PanelApi 适配实现。
  * 核心能力（session/messages/tokens/storage/event/renderer/part）完整映射；

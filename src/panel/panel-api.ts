@@ -55,6 +55,10 @@ export interface BalanceState {
  *  Created in the `tui` function scope so they do not survive module reload —
  *  the component re-creates them on mount and restores user config from kv. */
 export interface PanelSignals {
+  /** V2 owns balance selection/query state outside the presentation components. */
+  balanceManaged?: boolean
+  /** Bind commands to their originating tab before opening an asynchronous dialog. */
+  balanceForSession?: (sessionID: string | (() => string)) => PanelSignals
   currencySymbol: () => string
   setCurrencySymbol: (v: string) => void
   exchangeRate: () => number
