@@ -1,0 +1,72 @@
+{
+  "date": "2026-10-08",
+  "baseline": {
+    "version": "1.7.5",
+    "upstreamCommit": "6d93e072b76be983394c4e2f82803803697e1bb4",
+    "bundleSHA256": "97af24aa84cc4016614236420e7c251063ab2fe3e75398b14117544cede80183"
+  },
+  "proposedBundleSHA256": "cc0eb85591d8f6fc88216e98eeb74efc36210a0923a331cc821b0e9b9b3065d6",
+  "fixtureSourceSHA256": "45c3ea20472c9fcc1a71e3f370b757d57db6060eacc66adb5b74ee6836b7b0a1",
+  "rawResultSHA256": "7cc8c28b5db2fd3a94328d0d0cc8648a55778161851bfecce081fb05aaef2a92",
+  "method": {
+    "opencodeVersion": "2.0.22",
+    "terminalColumns": 180,
+    "terminalRows": 52,
+    "roundsPerVariant": 3,
+    "orders": [["baseline", "optimized"], ["optimized", "baseline"], ["baseline", "optimized"]],
+    "syntheticMessages": 128,
+    "syntheticOutputCharsPerMessage": 17408,
+    "tokenUpdatesPerTrial": 64,
+    "updateSpacingMilliseconds": 20,
+    "settleMilliseconds": 450,
+    "promptsSent": 0,
+    "durableFixtureStoresCreated": 0,
+    "balancePollingMounted": false,
+    "globalCLIConfigUnchanged": true,
+    "allOtherConfiguredPluginsRetained": false,
+    "cpuDefinition": "Whole temporary client user + system CPU milliseconds during the matched 64-update phase",
+    "wallDefinition": "Matched phase elapsed time, including scheduled waits and event-loop delay",
+    "snapshotDefinition": "Host memory-store update calls, not physical disk writes",
+    "outputReadDefinition": "Synthetic output text getter accesses, not physical disk reads",
+    "limitations": [
+      "Synthetic output-heavy workload, not a general real-session end-to-end speedup claim",
+      "Shared service and other TUIs remained live",
+      "The broader ten-second profiles include different extra correctness phases; do not compare their aggregate CPU/RSS",
+      "No idle CPU or RAM savings claim"
+    ]
+  },
+  "matchedPhase": "current-reactive-token-updates-64",
+  "runs": [
+    {"round": 1, "mode": "baseline", "cpuMilliseconds": 1967, "wallMilliseconds": 3325, "messageLists": 128, "modelLists": 128, "outputTextReads": 8256, "snapshotUpdates": 64, "identicalSnapshotUpdates": 0, "bundleProfileVerified": true, "correctnessChecksPassed": 9},
+    {"round": 1, "mode": "optimized", "cpuMilliseconds": 229, "wallMilliseconds": 1792, "messageLists": 128, "modelLists": 0, "outputTextReads": 1664, "snapshotUpdates": 5, "identicalSnapshotUpdates": 0, "bundleProfileVerified": true, "correctnessChecksPassed": 19},
+    {"round": 2, "mode": "optimized", "cpuMilliseconds": 192, "wallMilliseconds": 1806, "messageLists": 128, "modelLists": 0, "outputTextReads": 1664, "snapshotUpdates": 5, "identicalSnapshotUpdates": 0, "bundleProfileVerified": true, "correctnessChecksPassed": 19},
+    {"round": 2, "mode": "baseline", "cpuMilliseconds": 2037, "wallMilliseconds": 3414, "messageLists": 128, "modelLists": 128, "outputTextReads": 8256, "snapshotUpdates": 64, "identicalSnapshotUpdates": 0, "bundleProfileVerified": true, "correctnessChecksPassed": 9},
+    {"round": 3, "mode": "baseline", "cpuMilliseconds": 2065, "wallMilliseconds": 3401, "messageLists": 128, "modelLists": 128, "outputTextReads": 8256, "snapshotUpdates": 64, "identicalSnapshotUpdates": 0, "bundleProfileVerified": true, "correctnessChecksPassed": 9},
+    {"round": 3, "mode": "optimized", "cpuMilliseconds": 243, "wallMilliseconds": 1822, "messageLists": 128, "modelLists": 0, "outputTextReads": 1664, "snapshotUpdates": 5, "identicalSnapshotUpdates": 0, "bundleProfileVerified": true, "correctnessChecksPassed": 19}
+  ],
+  "activationSmoke": {
+    "success": true,
+    "actualLocalPluginProducedOwnedSnapshot": true,
+    "configuredCLIPluginDirectivesRetained": 7,
+    "temporaryTUIAliveForSeconds": 12,
+    "promptsSent": 0,
+    "historyClearCommands": 0,
+    "historicalSubagentEntriesBefore": 281,
+    "historicalSubagentEntriesAfter": 281,
+    "historicalSubagentEntriesIdentical": true,
+    "historicalShellManifestByteIdentical": true,
+    "configAndBundleUnchangedBySmoke": true,
+    "performanceComparison": false
+  },
+  "summary": {
+    "baselineCpuMsMean": 2023,
+    "proposedCpuMsMean": 221.33333333333334,
+    "matchedPhaseCpuReductionPercent": 89.1,
+    "outputGetterReductionPercent": 79.8,
+    "snapshotUpdateReductionPercent": 92.2,
+    "fixtureChecksPassed": 84,
+    "baselineAndProposedDistributionsEqual": true,
+    "proposedForeignEventScans": 0,
+    "proposedUnchangedCurrentEventSnapshotUpdates": 0
+  }
+}

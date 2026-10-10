@@ -88,11 +88,14 @@ export function createPanelApi(context: Context): PanelApi {
           const s = context.data.session.get(id)
           if (!s) return undefined
           const model = s.model as { providerID?: string; id?: string } | undefined
+          const aggregate = s as unknown as PanelSession
           return {
             id: s.id,
             title: s.title,
             agent: s.agent,
             model: model ? { providerID: model.providerID, id: model.id } : undefined,
+            tokens: aggregate.tokens,
+            cost: typeof aggregate.cost === "number" && Number.isFinite(aggregate.cost) ? aggregate.cost : undefined,
           }
         },
         messages(id: string): readonly any[] {
@@ -175,7 +178,20 @@ export function createPanelApi(context: Context): PanelApi {
       path: { directory: String((context.location as { directory?: string } | undefined)?.directory ?? "") },
     },
     event: {
-      on: (type: string, handler: (event: unknown) => void) => context.data.on(type, handler),
+      on(type: string, handler: (event: unknown) => void) {
+        // Retain legacy names for compatible hosts while translating the real
+        // V2 events. All V2 notifications are global, never implicitly local.
+        const aliases: Record<string, string[]> = {
+          "message.part.updated": ["session.tool.input.started", "session.tool.called", "session.tool.progress", "session.tool.success", "session.tool.failed"],
+          "message.updated": ["session.step.started", "session.step.ended", "session.step.failed"],
+          "session.updated": ["session.execution.succeeded", "session.execution.interrupted", "session.execution.failed"],
+        }
+        const unsubs = [type, ...(aliases[type] ?? [])].map((name) => context.data.on(name, (event) => {
+          const e = event as Record<string, any>
+          handler({ ...e, scope: "global" })
+        }))
+        return () => { for (const unsubscribe of unsubs) unsubscribe() }
+      },
     },
     renderer: { terminalWidth: context.renderer.terminalWidth },
     keys: { formatBindings: () => undefined },

@@ -2,17 +2,20 @@
 
 import type { JSX } from "@opentui/solid"
 import type { TuiThemeCurrent } from "@opencode-ai/plugin/tui"
-import type { UserMessage, AssistantMessage, Message } from "@opencode-ai/sdk"
-import type { Part, TextPart, ToolPart, FilePart, ReasoningPart } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, Message } from "@opencode-ai/sdk"
 import { createMemo, createSignal, createEffect, onMount, onCleanup, Show, For, untrack } from "solid-js"
 import { balanceProviders, getBalanceProvider, maskKey, matchBalanceProvider, type BalanceDetail, type BalanceDetailKey, type BalanceEntry, type BalanceProvider } from "../balance-providers"
 import { createT, type LangCode, type Translation } from "../i18n"
-import { MAX_SAT, FALLBACK, desaturateTo, dimColor, fmt, fmtCost, num, estimateTokens, progressBar, visualWidth, visualPadEnd, truncateVisual, formatBalanceText, type TokenDist } from "../core"
+import { MAX_SAT, FALLBACK, desaturateTo, dimColor, fmt, fmtCost, num, progressBar, visualWidth, visualPadEnd, truncateVisual, formatBalanceText } from "../core"
 import { PLUGIN_VERSION } from "../_version"
 import type { PanelApi, PanelSignals } from "./panel-api"
+import { createDistributionCalculator, emptyDistribution } from "./distribution"
+import { createCoalescedTask, isViewedSessionEvent } from "./refresh"
+import { createSnapshotWriter, readDistributionSnapshot } from "./snapshot"
 
 const MIN_PANEL_WIDTH = 20
 const DEFAULT_PANEL_WIDTH = 26
+const KV_PREFIX = "cache_panel"
 
 /** ── layout measurement constants (visual columns) ── */
 const LABEL_GAP = 1        // label（如 "Hit"）后面的空格
@@ -106,19 +109,21 @@ export function TokenCachePanel(props: {
   }
 
   // ── scan session messages reactively ──
-  // SolidJS createMemo re-evaluates whenever the underlying
-  // api.state.session state changes — no event listener needed.
+  // Track the cheap summary synchronously; coalesce expensive part work.
+  // Explicit events also cover hosts that mutate parts without replacing rows.
 
   // ── distribution cache ────────────────────────────────────────
   // When data() re-computes before api.state.part() is warm (e.g. after
   // a view switch), hasDistData flips to false and the distribution
   // block disappears.  Keep the last valid snapshot so the UI stays
   // stable until the next successful computation arrives.
-  const [lastDist, setLastDist] = createSignal<TokenDist>({
-    system: 0, user: 0, agent: 0, toolCall: 0, toolResult: 0,
-    output: 0, reasoning: 0, apiOutput: 0, apiInput: 0, stepCost: 0, stepCount: 0,
-  })
-  const [lastHasDist, setLastHasDist] = createSignal(false)
+  const distribution = createDistributionCalculator()
+  const refreshData = createCoalescedTask()
+  const snapshots = createSnapshotWriter(props.api.kv)
+  let viewedSid: string | undefined
+  let lastDist = emptyDistribution()
+  let lastHasDist = false
+  onCleanup(() => { refreshData.cancel(); snapshots.flush(); distribution.clear() })
 
   const [dataSignal, setDataSignal] = createSignal<any>({
     hitRate: 0, read: 0, write: 0, freshInput: 0, output: 0,
@@ -131,6 +136,9 @@ export function TokenCachePanel(props: {
     hasSkills: false,
   })
   const [refreshTick, setRefreshTick] = createSignal(0)
+  // Pricing is independent of message streaming; build the provider index once
+  // per model-list update, not twice per message update.
+  const providers = createMemo(() => props.api.state.provider)
 
   // 当前 provider 显示名（余额查询状态为共享信号，见 PanelSignals.balanceState）
   const providerName = createMemo(() => balanceProviders.find((p) => p.id === balanceProviderId())?.name ?? "")
@@ -192,7 +200,20 @@ export function TokenCachePanel(props: {
   createEffect(() => {
     const sid = props.signals.overrideSessionId() ?? props.sessionId
     void refreshTick()
-    void partVersion()
+    if (sid !== viewedSid) {
+      refreshData.cancel()
+      untrack(snapshots.flush)
+      distribution.clear()
+      viewedSid = sid
+      const restored = untrack(() => {
+        try { return readDistributionSnapshot(props.api.kv, sid) } catch { return undefined }
+      })
+      lastDist = restored ?? emptyDistribution()
+      lastHasDist = Boolean(restored)
+      // Never keep another session's cost, skills or distribution on screen.
+      setDataSignal((previous: any) => ({ ...previous, hasData: false, hasDistData: lastHasDist,
+        dist: lastDist, skills: [], hasSkills: false }))
+    }
 
     // 自然追踪 messages 和 provider（SDK 数据就绪时自动重新执行）
     const msgs = props.api.state.session.messages(sid) as Message[]
@@ -218,6 +239,10 @@ export function TokenCachePanel(props: {
     for (const msg of msgs) {
       if (msg.role !== "assistant") continue
       const tok = (msg as AssistantMessage).tokens; if (!tok) continue
+      // Distribution publication is coalesced, but retain deep host-store
+      // dependencies even when session aggregates avoid the fallback loop.
+      void tok.output
+      void tok.reasoning
       const mit = num(tok.input) + num(tok.cache?.read) + num(tok.cache?.write), mrt = num(tok.cache?.read)
       if (mit > 0) { prevMsgHitRate = lastMsgHitRate; lastMsgHitRate = (mrt / mit) * 100 }
       if (fallbackTokens) {
@@ -231,7 +256,7 @@ export function TokenCachePanel(props: {
       }
     }
     let saved = 0, inputRate = 0, cacheReadRate = 0, cacheWriteRate = 0
-    if (read > 0 && pid && mid && Array.isArray(props.api.state.provider)) for (const provider of props.api.state.provider) {
+    if (read > 0 && pid && mid && Array.isArray(providers())) for (const provider of providers()) {
       if (provider.id !== pid) continue
       const model = provider.models[mid]; if (!model?.cost) continue
       inputRate = num(model.cost.input); cacheReadRate = num(model.cost.cache?.read); cacheWriteRate = num(model.cost.cache?.write)
@@ -245,135 +270,36 @@ export function TokenCachePanel(props: {
     const hasTrendData = prevMsgHitRate >= 0 && lastMsgHitRate >= 0
     const trend = hasTrendData ? lastMsgHitRate - prevMsgHitRate : 0, providerName = pid || ""
 
-    // untrack 只包裹已知触发死锁的 API
-    const distData = untrack(() => {
-      let dist: TokenDist = { system: 0, user: 0, agent: 0, toolCall: 0, toolResult: 0, output: 0, reasoning: 0, apiOutput: 0, apiInput: 0, stepCost: 0, stepCount: 0 }
-      let hasDistData = false
-      const loadedSkills = new Map<string, { name: string; tokens: number }>()
-      try {
-        const cfg = props.api.state.config as Record<string, unknown>
-        const agentName = String(session?.agent ?? (cfg as any)?.default_agent ?? "build")
-        const agents = cfg?.agent as Record<string, unknown> | undefined
-        const agentCfg = agents?.[agentName] as Record<string, unknown> | undefined
-        const sysPrompt = typeof agentCfg?.prompt === "string" ? agentCfg.prompt : ""
-        if (sysPrompt) dist.system = estimateTokens(sysPrompt)
-        let lastAssMsg: AssistantMessage | undefined
-        for (const msg of msgs) {
-          if (msg.role === "user") {
-            const um = msg as UserMessage; if (um.system) dist.system += estimateTokens(um.system)
-            let parts: readonly Part[] = []; try { parts = props.api.state.part(msg.id) } catch {}
-            for (const p of parts) {
-              if (p.type === "text" && !(p as any).synthetic && !(p as any).ignored) dist.user += estimateTokens((p as any).text)
-              else if (p.type === "file") { const fp = p as any; if (fp.source?.text?.value) dist.user += estimateTokens(fp.source.text.value) }
-            }
-          } else if (msg.role === "assistant") {
-            const am = msg as AssistantMessage
-            dist.output += num(am.tokens?.output)
-            dist.reasoning += num(am.tokens?.reasoning)
-            let parts: readonly Part[] = []; try { parts = props.api.state.part(msg.id) } catch {}
-            for (const p of parts) {
-              if (p.type === "tool") {
-                const tp = p as any; let rawInput = ""
-                try { rawInput = tp.state.raw ?? (tp.state.input != null ? JSON.stringify(tp.state.input) : "") } catch {}
-                if (rawInput) dist.toolCall += estimateTokens(rawInput)
-                // 子代理委托（task 工具）：任务描述计入子代理指令（1.15.x 无 subtask part）
-                if (tp.tool === "task" && tp.state?.input) {
-                  const ti = tp.state.input
-                  const prompt = typeof ti.prompt === "string" ? ti.prompt : ""
-                  const desc = typeof ti.description === "string" ? ti.description : ""
-                  dist.agent += estimateTokens(prompt || desc)
-                }
-                if (tp.state.status === "completed") { const c = tp.state; if (c.output) dist.toolResult += estimateTokens(c.output) }
-                else if (tp.state.status === "error") { const e = tp.state; if (e.error) dist.toolResult += estimateTokens(e.error) }
-                if (tp.tool === "skill" && tp.state.status === "completed") {
-                  // TUI SDK strips tool metadata — extract skill name from well-known output format.
-                  // Cross-validated against api.client.app.skills() when available.
-                  let name: string | undefined = tp.state.metadata?.name
-                  if (typeof name !== "string") {
-                    const m = typeof tp.state.output === "string"
-                      ? tp.state.output.match(/^#{1,2}\s*Skill:\s*(.+)/m)
-                      : null
-                    if (m) name = m[1].trim()
-                  }
-                  if (typeof name === "string") {
-                    const tokens = typeof tp.state.output === "string" ? estimateTokens(tp.state.output) : 0
-                    const existing = loadedSkills.get(name)
-                    if (!existing || existing.tokens < tokens) {
-                      loadedSkills.set(name, { name, tokens })
-                    }
-                  }
-                }
-              } else if (p.type === "subtask") { const sub = p as any; dist.agent += estimateTokens(sub.prompt || sub.description || "") }
-            }
-          }
-        }
-        // 从后往前找最后一条有 token 数据的 assistant 消息（避免取到 streaming 中未填充的消息）
-        for (let i = msgs.length - 1; i >= 0; i--) {
-          if (msgs[i].role !== "assistant") continue
-          const tok = (msgs[i] as AssistantMessage).tokens
-          if (tok && ((tok.input ?? 0) > 0 || (tok.cache?.read ?? 0) > 0 || (tok.cache?.write ?? 0) > 0)) { lastAssMsg = msgs[i] as AssistantMessage; break }
-        }
-        // 取最后一条有数据消息的总输入（含缓存读/写）作为当前 context 大小
-        dist.apiInput = num(lastAssMsg?.tokens?.input) + num(lastAssMsg?.tokens?.cache?.read) + num(lastAssMsg?.tokens?.cache?.write)
-        dist.apiOutput = num(lastAssMsg?.tokens?.output)
-        // 本回合（最后一条有数据消息所在的 parentID 链）的 API 调用次数与末次成本。
-        // opencode 将回合内每次工具调用循环拆为独立 assistant 消息（各含 1 个 step-finish），
-        // 故按 parentID 链聚合统计，而非单条消息。
-        if (lastAssMsg) {
-          const roundParent = (lastAssMsg as AssistantMessage).parentID
-          let lastCost: number | undefined
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            const m = msgs[i]
-            if (m.role !== "assistant") continue
-            if ((m as AssistantMessage).parentID !== roundParent) break
-            let parts: readonly Part[] = []; try { parts = props.api.state.part(m.id) } catch {}
-            for (const p of parts) {
-              if (p.type !== "step-finish") continue
-              dist.stepCount++
-              const sc = (p as { cost?: unknown }).cost
-              if (lastCost === undefined && typeof sc === "number" && Number.isFinite(sc)) lastCost = sc
-            }
-          }
-          if (lastCost !== undefined) dist.stepCost = lastCost
-        }
-        hasDistData = dist.system + dist.user + dist.agent + dist.toolCall + dist.toolResult > 0 || dist.apiOutput > 0 || dist.apiInput > 0 || dist.reasoning > 0
-      } catch {}
-      const finalDist = hasDistData ? dist : lastDist(), finalHasDist = hasDistData || lastHasDist()
-      const skills = [...loadedSkills.values()]
-      return { finalDist, finalHasDist, skills }
-    })
-
-    setDataSignal({
-      hitRate, read, write, freshInput: input, output, cost, saved, model,
-      inputRate, cacheReadRate, cacheWriteRate, hasPricing,
-      hasData: read > 0 || write > 0 || input > 0 || output > 0 || cost > 0,
-      trend, hasTrendData, providerName, sessionHitRate,
-      dist: distData.finalDist, hasDistData: distData.finalHasDist,
-      skills: distData.skills, hasSkills: distData.skills.length > 0,
-    })
+    // Coalesce expensive part/output work independently of the cheap tracked
+    // summary reads. A continuous stream cannot postpone this timer forever.
+    refreshData.schedule(() => untrack(() => {
+      if (sid !== viewedSid) return
+      let cfg: Record<string, any> = {}
+      try { cfg = props.api.state.config ?? {} } catch { /* Config may not be warm yet. */ }
+      const agentName = String(session?.agent ?? cfg?.default_agent ?? "build")
+      const prompt = cfg?.agent?.[agentName]?.prompt
+      const distData = distribution.calculate(msgs, (id) => props.api.state.part(id), typeof prompt === "string" ? prompt : "")
+      if (distData.hasData) {
+        lastDist = distData.dist
+        lastHasDist = true
+        snapshots.schedule(sid, lastDist)
+      }
+      setDataSignal({
+        hitRate, read, write, freshInput: input, output, cost, saved, model,
+        inputRate, cacheReadRate, cacheWriteRate, hasPricing,
+        hasData: read > 0 || write > 0 || input > 0 || output > 0 || cost > 0,
+        trend, hasTrendData, providerName, sessionHitRate,
+        dist: lastDist, hasDistData: lastHasDist,
+        skills: distData.skills, hasSkills: distData.skills.length > 0,
+      })
+    }))
   })
 
   const data = createMemo(() => {
     return dataSignal()
   })
 
-  // Persist the last valid distribution so that data() can fall back
-  // to it while api.state.part() is re-hydrating after a view switch.
-  createEffect(() => {
-    const d = data()
-    if (d.hasDistData) {
-      setLastDist({ ...d.dist })
-      setLastHasDist(true)
-      // Also persist across component remounts (view switches)
-      try { props.api.kv.set(`${KV_PREFIX}.dist_snapshot`, { ...d.dist }) } catch {}
-    }
-  })
-
-  // ── token distribution (in-process via api.state.part) ──
-  const [partVersion, setPartVersion] = createSignal(0)
-
   // Persist fold state to api.kv
-  const KV_PREFIX = "cache_panel"
   const persistFold = (key: string, val: boolean) => {
     try { props.api.kv.set(`${KV_PREFIX}.${key}`, val) } catch {}
   }
@@ -433,10 +359,11 @@ export function TokenCachePanel(props: {
         setBorderVisible(bv !== false)
         // Restore distribution snapshot so the token distribution block
         // doesn't blank out while api.state.part() re-hydrates.
-        const cachedDist = props.api.kv.get<TokenDist>(`${KV_PREFIX}.dist_snapshot`)
-        if (cachedDist) {
-          setLastDist(cachedDist)
-          setLastHasDist(true)
+        const cachedDist = readDistributionSnapshot(props.api.kv, props.signals.overrideSessionId() ?? props.sessionId)
+        if (cachedDist && !lastHasDist) {
+          lastDist = cachedDist
+          lastHasDist = true
+          setDataSignal((previous: any) => ({ ...previous, dist: lastDist, hasDistData: true }))
         }
       } catch {
         // kv read failed — signals stay at defaults
@@ -447,6 +374,8 @@ export function TokenCachePanel(props: {
       }
     }
 
+    const restoreTask = createCoalescedTask(10)
+    onCleanup(restoreTask.cancel)
     if (props.api.kv.ready) {
       doRestore()
     } else {
@@ -458,7 +387,7 @@ export function TokenCachePanel(props: {
       const pollRestore = () => {
         if (!props.api.kv.ready) {
           if (++tries > MAX_POLL) { doRestore(); return }
-          setTimeout(pollRestore, 10)
+          restoreTask.schedule(pollRestore)
           return
         }
         doRestore()
@@ -466,19 +395,15 @@ export function TokenCachePanel(props: {
       pollRestore()
     }
 
-    // Debounce partVersion updates so that event bursts during session
-    // switching / streaming don't cause data() to re-compute on every
-    // single event (up to hundreds per second on Linux single-thread).
-    let partTimer: ReturnType<typeof setTimeout> | undefined
-    const bumpPartVersion = () => {
-      clearTimeout(partTimer)
-      partTimer = setTimeout(() => setPartVersion((v) => v + 1), 100)
+    const requestRefresh = (event: unknown) => {
+      const sid = props.signals.overrideSessionId() ?? props.sessionId
+      if (isViewedSessionEvent(event, sid)) setRefreshTick((v) => v + 1)
     }
-    const unsubPart = props.api.event.on("message.part.updated", () => { bumpPartVersion(); setRefreshTick(v => v + 1) })
-    const unsubMsg = props.api.event.on("message.updated", () => { bumpPartVersion(); setRefreshTick(v => v + 1) })
-    const unsubSession = props.api.event.on("session.updated", () => { setRefreshTick(v => v + 1) })
+    const unsubPart = props.api.event.on("message.part.updated", requestRefresh)
+    const unsubMsg = props.api.event.on("message.updated", requestRefresh)
+    const unsubSession = props.api.event.on("session.updated", requestRefresh)
     setRefreshTick(v => v + 1)
-    onCleanup(() => { clearTimeout(partTimer); unsubPart(); unsubMsg(); unsubSession() })
+    onCleanup(() => { unsubPart(); unsubMsg(); unsubSession() })
   })
 
   // ── colours ──
