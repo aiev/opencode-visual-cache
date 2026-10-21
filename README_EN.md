@@ -210,10 +210,13 @@ Supported balance providers:
 | OpenRouter | `https://openrouter.ai/api/v1/credits` | USD | `sk-or-` | ✅ Supported |
 | Moonshot | `https://api.moonshot.cn/v1/users/me/balance` | CNY | `sk-` | ✅ Supported |
 | QwenCloud Token Plan | Console gateway (`home.qwencloud.com` + `cs-data.qwencloud.com`, browser cookie) / fallback `qwencloud usage summary` CLI | Credits | Optional cookie, or CLI login | ✅ Supported |
+| OpenCode Go | `https://opencode.ai/inference/go/v1/usage` | Usage % (5h / 7d / 30d) | OpenCode login (`/connect` console) or `oc_sk_...` Go API key | ✅ Supported |
 | Zhipu GLM | Pending (community-reversed endpoint, unofficial) | CNY | — | ⏳ Planned |
 | xAI | Pending (requires Management Key + Team ID) | USD | — | ⏳ Planned |
 
 > **Key source**: a key set manually via `/cache-balance-key` takes priority; otherwise the plugin reuses the credential OpenCode already authenticated (`/connect`-configured providers). Providers with neither cannot show a balance.
+>
+> **OpenCode Go**: automatically reuses the OpenCode login (the `opencode-go` integration's Go API key first, then the `opencode` integration's OAuth access token) — no separate setup. You can also override it in `/cache-balance-key` with an `st_...` / `oc_sk_...` token. The summary shows the smallest remaining percentage across the three windows; expand it to see used / remaining / reset countdown for rolling 5h, weekly, and monthly 30d. An expired login (401) asks you to reconnect via `/connect`; an account without a Go subscription (403 `EntitlementError`) reports no plan.
 >
 > **QwenCloud Token Plan (login state, not an API key)**: the Token Plan `sk-sp-*` key is inference-only — every billing route answers `ConsoleNeedLogin`, so quota cannot be queried with it. Two sources are available:
 >

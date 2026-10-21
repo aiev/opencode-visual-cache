@@ -45,6 +45,9 @@ export interface BalanceProvider {
   keyPlaceholder?: string       // key 输入框占位（如 "sk-..."）
   /** OpenCode providerID 别名（如 alibaba-token-plan → qwencloud）；支持前缀匹配。 */
   aliases?: readonly string[]
+  /** 自动凭据解析时按顺序尝试的宿主 providerID / SQLite integration_id。
+   *  默认使用命中的宿主 provider id（无命中时用 provider.id）。 */
+  credentialProviderIDs?: readonly string[]
   /** false = 不依赖 API key（凭据由外部登录态提供，如 qwencloud CLI）。默认需要 key。 */
   requiresKey?: boolean
   /** 凭据的 KV 槽位后缀（默认 "key"）。requiresKey === false 时也可配置可选凭据
@@ -428,6 +431,79 @@ const openaiProvider: BalanceProvider = {
     }
     const json = await res.json()
     return parseOpenAIUsage(json)
+  },
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode Go — usage windows returned by the Go inference gateway.
+// `percent` is the used share (0–100); the panel reports the remaining share.
+// ---------------------------------------------------------------------------
+
+const OPENCODE_GO_WINDOWS: ReadonlyArray<{ key: "rolling" | "weekly" | "monthly"; windowSeconds: number }> = [
+  { key: "rolling", windowSeconds: 5 * 60 * 60 },
+  { key: "weekly", windowSeconds: 7 * 24 * 60 * 60 },
+  { key: "monthly", windowSeconds: 30 * 24 * 60 * 60 },
+]
+
+function getOpenCodeGoResetSeconds(snapshot: OpenAIRecord, nowMs: number): number | undefined {
+  const value = snapshot.resetsAt ?? snapshot.resets_at ?? snapshot.resetAt ?? snapshot.reset_at
+  if (typeof value !== "string" || !value) return undefined
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return undefined
+  return Math.max(0, Math.round((timestamp - nowMs) / 1000))
+}
+
+export function parseOpenCodeGoUsage(raw: unknown, nowMs = Date.now()): BalanceEntry[] {
+  const usage = asRecord(asRecord(raw)?.usage)
+  if (!usage) throw new BalanceError("EMPTY")
+
+  const details: BalanceDetail[] = []
+  const remainingValues: number[] = []
+  for (const { key, windowSeconds } of OPENCODE_GO_WINDOWS) {
+    const snapshot = asRecord(usage[key])
+    const percent = asFiniteNumber(snapshot?.percent)
+    if (percent === undefined) continue
+
+    const used = clampPercent(percent)
+    const remaining = clampPercent(100 - used)
+    appendQuotaDetails(details, { used, remaining }, windowSeconds)
+    remainingValues.push(remaining)
+
+    const reset = snapshot ? getOpenCodeGoResetSeconds(snapshot, nowMs) : undefined
+    if (reset !== undefined) details.push({ key: "reset", value: String(reset), windowSeconds })
+  }
+
+  if (remainingValues.length === 0) throw new BalanceError("EMPTY")
+  const summary = formatPercent(Math.min(...remainingValues))
+  return [{
+    currency: "GO",
+    total: `${summary}%`,
+    display: `OpenCode Go ${summary}%`,
+    details,
+  }]
+}
+
+const opencodeGoProvider: BalanceProvider = {
+  id: "opencode-go",
+  name: "OpenCode Go",
+  keyPlaceholder: "st_... (OpenCode login) or oc_sk_... (Go API key)",
+  // Go sessions use the opencode-go provider; the /connect login is stored
+  // under the plain `opencode` integration, so try both in that order.
+  credentialProviderIDs: ["opencode-go", "opencode"],
+  async fetchBalance(token, signal) {
+    const res = await fetch("https://opencode.ai/inference/go/v1/usage", {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      signal,
+    })
+    if (!res.ok) {
+      if (res.status === 401) throw new BalanceError("GO_AUTH")
+      if (res.status === 403) {
+        const body = await res.text().catch(() => "")
+        throw new BalanceError(/entitle/i.test(body) ? "GO_NOPLAN" : "403")
+      }
+      throw new BalanceError(String(res.status))
+    }
+    return parseOpenCodeGoUsage(await res.json())
   },
 }
 
@@ -895,7 +971,7 @@ const qwencloudProvider: BalanceProvider = {
 }
 
 /** 已注册的 provider 列表（按需追加新适配器）。 */
-export const balanceProviders: BalanceProvider[] = [deepseekProvider, siliconflowProvider, openrouterProvider, moonshotProvider, hyperProvider, openaiProvider, qwencloudProvider]
+export const balanceProviders: BalanceProvider[] = [deepseekProvider, siliconflowProvider, openrouterProvider, moonshotProvider, hyperProvider, openaiProvider, opencodeGoProvider, qwencloudProvider]
 
 /** 按 id 取 provider；未知 id 回退到第一个。 */
 export function getBalanceProvider(id: string): BalanceProvider {
