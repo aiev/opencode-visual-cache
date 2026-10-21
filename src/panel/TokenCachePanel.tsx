@@ -738,7 +738,9 @@ export function TokenCachePanel(props: {
                   <span>{(() => {
                     const code = balanceState().error
                     if (code === "401") return t("balErr401")
+                    if (code === "GO_AUTH") return t("balErrGoAuth")
                     if (code === "403") return t("balErr403")
+                    if (code === "GO_NOPLAN") return t("balErrGoNoPlan")
                     if (code === "EMPTY") return t("balErrEmpty")
                     if (code === "TIMEOUT") return t("balErrTimeout")
                     if (code === "CLI") return t("balErrCli")

@@ -20,24 +20,37 @@ function extractToolParts(msg: Record<string, any>): Array<Record<string, any>> 
 /** V2 版 findOpencodeKey：优先使用 V2 provider list 暴露的 key（宿主提供时），
  *  否则解析宿主已认证凭据——V2 的 Provider.Info 不含 key 字段，且凭据保存在
  *  宿主 SQLite（credential 表），auth.json 仅作迁移遗留兜底（见 credentials.ts）。
- *  导出供 index.tsx 的余额轮询复用。 */
-export function findOpencodeKeyV2(context: Context, provider: BalanceProvider, sourceProviderID?: string): string {
+ *  provider.credentialProviderIDs 可指定多个 integration_id（如 OpenCode Go 的
+ *  `opencode-go` / `opencode`），按顺序返回第一个可用 token。
+ *  导出供 index.tsx 的余额轮询复用；resolveToken 供测试注入。 */
+export function findOpencodeKeyV2(
+  context: Context,
+  provider: BalanceProvider,
+  sourceProviderID?: string,
+  resolveToken: (providerID: string) => string = resolveCredentialToken,
+): string {
   const scopedID = sourceProviderID && matchBalanceProvider(sourceProviderID)?.id === provider.id ? sourceProviderID : undefined
   const id = (scopedID ?? provider.id).toLowerCase()
+  let hit: { id?: string; key?: string; options?: { apiKey?: string } } | undefined
   try {
     const provs = context.data.location.provider.list(context.location) as Array<{ id?: string; key?: string; options?: { apiKey?: string } }>
-    const hit = provs.find((p) => String(p.id ?? "").toLowerCase() === id)
+    hit = provs.find((p) => String(p.id ?? "").toLowerCase() === id)
       ?? (!scopedID ? provs.find((p) => String(p.id ?? "").toLowerCase().startsWith(id)) : undefined)
-    if (hit) {
-      const k = typeof hit.key === "string" ? hit.key : ""
-      if (k) return k
-      const optionKey = typeof hit.options?.apiKey === "string" ? hit.options.apiKey : ""
-      if (optionKey) return optionKey
-      // 用 OpenCode provider 的 integration_id 去查 SQLite（而非 balance provider id）
-      if (hit.id) return resolveCredentialToken(hit.id)
-    }
   } catch { /* fall through to stored credentials */ }
-  return resolveCredentialToken(scopedID ?? provider.id)
+
+  if (hit) {
+    const k = typeof hit.key === "string" ? hit.key : ""
+    if (k) return k
+    const optionKey = typeof hit.options?.apiKey === "string" ? hit.options.apiKey : ""
+    if (optionKey) return optionKey
+  }
+
+  const credentialIDs = provider.credentialProviderIDs ?? [hit?.id ?? scopedID ?? provider.id]
+  for (const credentialID of credentialIDs) {
+    const token = resolveToken(credentialID)
+    if (token) return token
+  }
+  return ""
 }
 
 /** 当前路由 sessionID（V2 ui.router.current()；Route = { type: "session", sessionID }）。 */

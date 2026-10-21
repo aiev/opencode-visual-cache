@@ -206,10 +206,13 @@ npm install -g opencode-visual-cache@latest
 | OpenRouter | `https://openrouter.ai/api/v1/credits` | USD | `sk-or-` | ✅ 已支持 |
 | Moonshot | `https://api.moonshot.cn/v1/users/me/balance` | CNY | `sk-` | ✅ 已支持 |
 | QwenCloud Token Plan | 控制台网关（`home.qwencloud.com` + `cs-data.qwencloud.com`，浏览器 Cookie）／回退 `qwencloud usage summary` CLI | Credits | 可选 Cookie，或 CLI 登录态 | ✅ 已支持 |
+| OpenCode Go | `https://opencode.ai/inference/go/v1/usage` | 用量 %（5h / 7d / 30d） | OpenCode 登录态（`/connect` 控制台）或 `oc_sk_...` Go API key | ✅ 已支持 |
 | 智谱 GLM | 待接入（社区逆向端点，非官方） | CNY | — | ⏳ 希望支持 |
 | xAI | 待接入（需 Management Key + Team ID） | USD | — | ⏳ 希望支持 |
 
 > **Key 来源**：优先使用 `/cache-balance-key` 手动配置的 Key；未手动配置时自动复用 OpenCode 已认证的凭据（`/connect` 配置的 provider）。两者都没有的提供商无法查询余额。
+>
+> **OpenCode Go**：自动复用 OpenCode 已登录的凭据（优先 SQLite 中 `opencode-go` 集成的 Go API key，其次 `opencode` 集成的 OAuth access token），无需单独配置；也可以在 `/cache-balance-key` 中手动填 `st_...` / `oc_sk_...` 覆盖。摘要显示三个窗口中最少的剩余百分比，展开可查看 5 小时（rolling）、7 天（weekly）、30 天（monthly）的已用 / 剩余 / 重置倒计时。登录失效（401）会提示用 `/connect` 重新登录；账号没有 Go 订阅（403 `EntitlementError`）会提示无套餐。
 >
 > **QwenCloud Token Plan（不消费 API Key，用登录态）**：Token Plan 的 `sk-sp-*` 专用 key 只做推理，billing 路由一律返回 `ConsoleNeedLogin`，quota 无法用 key 查询。额度有两个来源：
 >
